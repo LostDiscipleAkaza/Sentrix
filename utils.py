@@ -115,6 +115,8 @@ def draw_frame(title: str, lines: List[str], width: int = 76, color: str = Color
     └────────────────────────────────────────────┘
     """
     clean_title = strip_ansi(title)
+    max_line_len = max([len(strip_ansi(l)) for l in lines] + [len(clean_title) + 6]) if lines else len(clean_title) + 6
+    width = max(width, max_line_len + 4)
     title_part = f"─[ {title} ]"
     clean_title_part = f"─[ {clean_title} ]"
     remain = width - 2 - len(clean_title_part)

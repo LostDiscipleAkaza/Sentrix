@@ -77,6 +77,14 @@ class TestDNSEnum(unittest.TestCase):
         self.assertIn("api.example.com", subs)
         self.assertEqual(subs["api.example.com"], ["10.0.0.1"])
 
+    @patch("dns_enum._resolve_subdomain")
+    def test_wildcard_dns_filtering(self, mock_resolve_sub):
+        # Everything resolves to the wildcard IP 192.168.1.99
+        mock_resolve_sub.side_effect = lambda sub: ["192.168.1.99"]
+        subs = enumerate_subdomains("wildcard-test.com", use_crtsh=False, wordlist=["dev", "mail"])
+        # Because all dictionary candidates match the wildcard IP, they should be filtered out
+        self.assertEqual(subs, {})
+
 
 if __name__ == "__main__":
     unittest.main()
