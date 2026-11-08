@@ -6,6 +6,7 @@ and passive Certificate Transparency & dictionary subdomain discovery.
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 import socket
+import uuid
 from typing import Any, Dict, List, Optional, Set
 
 import dns.query
@@ -167,6 +168,16 @@ def _resolve_subdomain(subdomain: str) -> List[str]:
     return ips
 
 
+def check_wildcard_dns(domain: str) -> Set[str]:
+    """
+    Tests whether the domain has wildcard DNS records enabled by querying
+    a guaranteed non-existent UUID subdomain. Returns the set of wildcard IPs if active.
+    """
+    random_sub = f"chk-{uuid.uuid4().hex[:10]}.{domain}"
+    ips = _resolve_subdomain(random_sub)
+    return set(ips)
+
+
 def enumerate_subdomains(
     domain: str,
     use_crtsh: bool = True,
@@ -175,10 +186,11 @@ def enumerate_subdomains(
 ) -> Dict[str, List[str]]:
     """
     Discovers subdomains using passive Certificate Transparency (crt.sh)
-    and active dictionary-based DNS resolution in parallel.
+    and active dictionary-based DNS resolution in parallel with wildcard DNS filtering.
     Returns a dict mapping {subdomain: [ip1, ip2, ...]}.
     """
     candidate_subdomains: Set[str] = set()
+    ct_subdomains: Set[str] = set()
 
     # 1. Passive Certificate Transparency lookup
     if use_crtsh:
@@ -190,7 +202,12 @@ def enumerate_subdomains(
     for w in words:
         candidate_subdomains.add(f"{w.lower()}.{domain.lower()}")
 
-    # 3. Resolve all candidate subdomains concurrently
+    # 3. Detect and filter Wildcard DNS
+    wildcard_ips = check_wildcard_dns(domain)
+    if wildcard_ips:
+        logger.debug(f"Wildcard DNS active on {domain} resolving to {wildcard_ips}")
+
+    # 4. Resolve all candidate subdomains concurrently
     resolved_subdomains: Dict[str, List[str]] = {}
     if not candidate_subdomains:
         return resolved_subdomains
@@ -205,6 +222,9 @@ def enumerate_subdomains(
             try:
                 ips = future.result()
                 if ips:
+                    # Filter out dictionary false positives that only match wildcard IPs
+                    if wildcard_ips and set(ips) == wildcard_ips and sub not in ct_subdomains:
+                        continue
                     resolved_subdomains[sub] = ips
             except Exception:
                 continue

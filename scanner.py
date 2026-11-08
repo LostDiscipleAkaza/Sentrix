@@ -146,13 +146,14 @@ def scan(
         scanner = nmap.PortScanner()
 
         # Build nmap arguments based on port specification
+        ipv6_flag = " -6" if ":" in ip else ""
         if port_spec == "top-200":
-            nmap_args = "-sV -sS -Pn -O --top-ports 200"
+            nmap_args = f"-sV -sS -Pn -O --top-ports 200{ipv6_flag}"
         elif port_spec.startswith("top-"):
             count = port_spec[4:]
-            nmap_args = f"-sV -sS -Pn -O --top-ports {count}"
+            nmap_args = f"-sV -sS -Pn -O --top-ports {count}{ipv6_flag}"
         else:
-            nmap_args = f"-sV -sS -Pn -O -p {port_spec}"
+            nmap_args = f"-sV -sS -Pn -O -p {port_spec}{ipv6_flag}"
 
         scanner.scan(ip, arguments=nmap_args)
 

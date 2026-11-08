@@ -220,12 +220,13 @@ def load_cisa_kev_catalog(
     with _db_lock:
         with _open_db(db_path) as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT cve_id, cached_at FROM cisa_kev_cache")
-            rows = cursor.fetchall()
-            if rows:
-                oldest = min(r[1] for r in rows)
+            cursor.execute("SELECT MIN(cached_at) FROM cisa_kev_cache")
+            min_row = cursor.fetchone()
+            if min_row and min_row[0] is not None:
+                oldest = min_row[0]
                 if now - oldest <= ttl_seconds:
-                    cached_kevs = {r[0] for r in rows}
+                    cursor.execute("SELECT cve_id FROM cisa_kev_cache")
+                    cached_kevs = {r[0] for r in cursor.fetchall()}
                     _cisa_kev_memory_cache = cached_kevs
                     return _cisa_kev_memory_cache
 
