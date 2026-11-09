@@ -441,7 +441,17 @@ def lookup_by_cpe(cpe23: Optional[str]) -> Dict[str, Any]:
     if not cpe23:
         return {"status": "unmatched", "cves": [], "reason": "no_cpe_available"}
 
-    param_name = "virtualMatchString" if "*" in cpe23 else "cpeName"
+    fields = cpe23.split(":")
+    # cpe:2.3:part:vendor:product:version:update:edition:language:sw_edition:target_sw:target_hw:other
+    vendor = fields[3] if len(fields) > 3 else ""
+    product = fields[4] if len(fields) > 4 else ""
+    version = fields[5] if len(fields) > 5 else "*"
+
+    is_version_wildcard = version in ("*", "-", "")
+    # In NVD API 2.0:
+    # Use cpeName when a specific version is provided (non-wildcard).
+    # Use virtualMatchString only when version is wildcarded.
+    param_name = "virtualMatchString" if is_version_wildcard else "cpeName"
 
     try:
         _throttle()
@@ -461,7 +471,22 @@ def lookup_by_cpe(cpe23: Optional[str]) -> Dict[str, Any]:
         return {"status": "error", "cves": [], "reason": "invalid_json_response"}
 
     seen = {}
+    product_clean = product.lower().replace("_", "")
+    vendor_clean = vendor.lower().replace("_", "")
+
     for item in data.get("vulnerabilities", []):
+        cve_obj = item.get("cve", {})
+
+        # Validation: Protect against NVD returning default unfiltered feed (e.g. Ping of Death from 1999)
+        # Verify that either the CVE configurations or descriptions relate to the requested product/vendor
+        if product_clean:
+            descs = " ".join(d.get("value", "").lower() for d in cve_obj.get("descriptions", []))
+            configs_str = json.dumps(cve_obj.get("configurations", [])).lower()
+            if product_clean not in descs and product.lower() not in descs and product_clean not in configs_str:
+                # If neither product nor vendor appears anywhere in the CVE record, reject as false positive
+                if vendor_clean not in descs and vendor_clean not in configs_str:
+                    continue
+
         entry = _parse_cve_entry(item)
         if entry.get("id"):
             seen[entry["id"]] = entry
@@ -474,7 +499,7 @@ def lookup_by_cpe(cpe23: Optional[str]) -> Dict[str, Any]:
         key=lambda c: (c["cvss"] is None, -(c["cvss"] or 0)),
     )
     res = {"status": "matched", "cves": cves, "source": "nvd"}
-    if "*" in cpe23:
+    if is_version_wildcard:
         res["version_unspecified"] = True
     return res
 
@@ -561,9 +586,18 @@ def lookup_cves(cpe22_raw: Any, bypass_cache: bool = False) -> Dict[str, Any]:
     if not bypass_cache:
         cached_result = get_cached_cpe(cpe_normalized)
         if cached_result:
-            # Already has CVEs; ensure KEV / EPSS are fresh
-            cached_result["cves"] = enrich_cves(cached_result["cves"])
-            return cached_result
+            # Self-healing check: purge corrupted cache entries containing bogus Ping of Death
+            cves = cached_result.get("cves", [])
+            has_bogus_ping = any(c.get("id") == "CVE-1999-0128" for c in cves)
+            vendor, product = cpe22_vendor_product(cpe_normalized)
+            if has_bogus_ping and product not in ("linux_kernel", "tcp_ip", "icmp"):
+                # Evict corrupted cache entry
+                with _db_lock:
+                    with _open_db() as conn:
+                        conn.cursor().execute("DELETE FROM cpe_cache WHERE cpe = ?", (cpe_normalized,))
+            else:
+                cached_result["cves"] = enrich_cves(cves)
+                return cached_result
 
     # 2. Perform fresh lookups
     cpe23 = cpe22_to_cpe23(cpe_normalized)

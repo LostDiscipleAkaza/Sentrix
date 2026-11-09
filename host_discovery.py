@@ -23,8 +23,7 @@ def icmp_ping(ip: str, timeout: float = 2.0) -> bool:
             cmd.append("-6")
         cmd.append(ip)
     else:
-        ping_bin = "ping6" if (is_ipv6 and system != "darwin") else "ping"
-        cmd = [ping_bin, "-c", "1", "-W", str(max(1, int(timeout))), ip]
+        cmd = ["ping", "-6" if is_ipv6 else "-4", "-c", "1", "-W", str(max(1, int(timeout))), ip]
 
     try:
         result = subprocess.run(

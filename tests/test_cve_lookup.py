@@ -21,6 +21,7 @@ from cve_lookup import (
 class TestCVELookup(unittest.TestCase):
 
     def setUp(self):
+        cve_lookup._MIN_INTERVAL = 0.0
         self.temp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         self.db_path = self.temp_db.name
         self.temp_db.close()
@@ -110,6 +111,47 @@ class TestCVELookup(unittest.TestCase):
         self.assertTrue(enriched[0]["cisa_kev"])
         self.assertFalse(enriched[1]["cisa_kev"])
         self.assertEqual(enriched[0]["epss"], 0.95)
+
+    @patch("cve_lookup.requests.get")
+    def test_lookup_by_cpe_uses_cpe_name_and_filters_unrelated(self, mock_get):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        # Return a payload that contains 1 valid nginx CVE and 1 unrelated ping of death CVE
+        mock_resp.json.return_value = {
+            "vulnerabilities": [
+                {
+                    "cve": {
+                        "id": "CVE-1999-0128",
+                        "descriptions": [{"value": "Buffer overflow in ping/icmp handling."}],
+                        "metrics": {"cvssMetricV2": [{"cvssData": {"baseScore": 5.0}}]},
+                    }
+                },
+                {
+                    "cve": {
+                        "id": "CVE-2021-23017",
+                        "descriptions": [{"value": "A security issue in nginx 1.18.0 DNS resolver allows memory overwrite."}],
+                        "metrics": {"cvssMetricV31": [{"cvssData": {"baseScore": 7.7, "baseSeverity": "HIGH"}}]},
+                    }
+                },
+            ]
+        }
+        mock_get.return_value = mock_resp
+
+        # 1. Test exact version CPE uses cpeName param
+        res = cve_lookup.lookup_by_cpe("cpe:2.3:a:igor_sysoev:nginx:1.18.0:*:*:*:*:*:*:*")
+        args, kwargs = mock_get.call_args
+        self.assertIn("cpeName", kwargs["params"])
+        self.assertNotIn("virtualMatchString", kwargs["params"])
+
+        # 2. Test that CVE-1999-0128 was rejected as false positive and CVE-2021-23017 was kept
+        cve_ids = [c["id"] for c in res["cves"]]
+        self.assertNotIn("CVE-1999-0128", cve_ids)
+        self.assertIn("CVE-2021-23017", cve_ids)
+
+        # 3. Test wildcard version uses virtualMatchString param
+        cve_lookup.lookup_by_cpe("cpe:2.3:a:nginx:nginx:*:*:*:*:*:*:*:*")
+        args, kwargs = mock_get.call_args
+        self.assertIn("virtualMatchString", kwargs["params"])
 
     @patch("cve_lookup.lookup_by_cpe")
     @patch("cve_lookup.enrich_cves")

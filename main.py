@@ -58,7 +58,10 @@ def print_finding(finding: Dict[str, Any]) -> None:
 
     print(f"  {ColorCodes.GREEN}►{ColorCodes.RESET} Service : {svc_str} on Port {port_str} {ColorCodes.DIM}({info}){ColorCodes.RESET}")
     if finding.get("banner"):
-        print(f"    Banner  : {ColorCodes.DIM}{finding['banner'][:100]}{ColorCodes.RESET}")
+        b_text = finding["banner"].strip()
+        if len(b_text) > 115:
+            b_text = b_text[:112] + "..."
+        print(f"    Banner  : {ColorCodes.DIM}{b_text}{ColorCodes.RESET}")
 
     if finding.get("waf_cdn"):
         print(f"    {ColorCodes.BOLD}{ColorCodes.MAGENTA}WAF/CDN :{ColorCodes.RESET} {finding['waf_cdn']}")
@@ -294,6 +297,11 @@ def main() -> None:
                 )
                 continue
 
+            all_findings: List[Dict[str, Any]] = []
+            all_os_info: List[Dict[str, Any]] = []
+            active_scanned_ips: List[str] = []
+            any_alive = False
+
             # 3. Scan each resolved IP
             for ip in resolved_ips:
                 draw_section_header(f"PHASE 2: HOST DISCOVERY & PORT INTELLIGENCE [{ip}]")
@@ -310,34 +318,12 @@ def main() -> None:
                         print(f"  [-] Host {ip} is {ColorCodes.YELLOW}OFFLINE / UNRESPONSIVE{ColorCodes.RESET} to ICMP & TCP probes.")
                         print(f"      {ColorCodes.DIM}(Skipping port scan for this IP. Pass --no-ping to force full scan){ColorCodes.RESET}")
                         draw_section_footer()
-
-                        # Write report indicating host offline
-                        write_report(
-                            target=target,
-                            ip=ip,
-                            ip_addresses=resolved_ips,
-                            findings=[],
-                            dns_records=dns_records,
-                            os_info=[],
-                            alive=False,
-                            subdomains=subdomains,
-                            zone_transfer=zone_transfer,
-                            metadata={
-                                "scanner_version": "Reconnoiter 2.0.0",
-                                "command_line_args": " ".join(sys.argv[1:]),
-                                "scan_start_time": scan_start_timestamp,
-                                "scan_end_time": current_timestamp(),
-                                "scan_duration_seconds": round(time.time() - start_monotonic, 2),
-                                "ports_scanned": args.ports,
-                                "target": target,
-                                "ip": ip,
-                            },
-                            output_path=args.output_file,
-                            formats=[args.format],
-                        )
                         continue
                     else:
                         print(f"  [+] Host {ip} status: {ColorCodes.GREEN}ALIVE{ColorCodes.RESET}")
+
+                any_alive = True
+                active_scanned_ips.append(ip)
 
                 # Port & Service scan
                 logger.info(f"Scanning ports [{args.ports}] on {ip}...")
@@ -359,6 +345,7 @@ def main() -> None:
                     print(f"  {ColorCodes.GREEN}[+]{ColorCodes.RESET} OS Detection matches:")
                     for match in os_info:
                         print(f"      • {match['name']} ({match['accuracy']}% accuracy)")
+                    all_os_info.extend(os_info)
 
                 if not findings:
                     print(f"  {ColorCodes.YELLOW}[!] No open TCP ports discovered on {ip}{ColorCodes.RESET}")
@@ -382,60 +369,68 @@ def main() -> None:
                     # Phase 3: Vulnerability Intelligence
                     draw_section_header(f"PHASE 3: THREAT INTELLIGENCE & CVE AUDIT [{ip}]")
                     for finding in findings:
+                        finding["ip"] = ip
                         if not args.no_cve:
                             check_cves(finding)
                         print_finding(finding)
                     draw_section_footer()
 
-                # Metadata compilation
-                scan_end_timestamp = current_timestamp()
-                duration = round(time.time() - start_monotonic, 2)
-                metadata = {
-                    "scanner_version": "Reconnoiter 2.0.0",
-                    "command_line_args": " ".join(sys.argv[1:]),
-                    "scan_start_time": scan_start_timestamp,
-                    "scan_end_time": scan_end_timestamp,
-                    "scan_duration_seconds": duration,
-                    "ports_scanned": args.ports,
-                    "target": target,
-                    "ip": ip,
-                }
+                    all_findings.extend(findings)
 
-                # 4. Write reports
-                written_files = write_report(
-                    target=target,
-                    ip=ip,
-                    ip_addresses=resolved_ips,
-                    findings=findings,
-                    dns_records=dns_records,
-                    os_info=os_info,
-                    alive=alive,
-                    subdomains=subdomains,
-                    zone_transfer=zone_transfer,
-                    metadata=metadata,
-                    output_path=args.output_file,
-                    formats=[args.format],
-                )
+            # 4. Consolidated Target Reporting & Assessment Dashboard
+            scan_end_timestamp = current_timestamp()
+            duration = round(time.time() - start_monotonic, 2)
+            primary_ip = active_scanned_ips[0] if active_scanned_ips else (resolved_ips[0] if resolved_ips else "")
+            target_alive = any_alive or args.no_ping
 
-                # Count statistics for summary card
-                crit_count = sum(1 for f in findings for c in f.get("cves", []) if c.get("severity") == "CRITICAL" or (c.get("cvss") or 0) >= 9.0)
-                kev_count = sum(1 for f in findings for c in f.get("cves", []) if c.get("cisa_kev"))
-                total_cves = sum(len(f.get("cves", [])) for f in findings)
+            metadata = {
+                "scanner_version": "Reconnoiter 2.0.0",
+                "command_line_args": " ".join(sys.argv[1:]),
+                "scan_start_time": scan_start_timestamp,
+                "scan_end_time": scan_end_timestamp,
+                "scan_duration_seconds": duration,
+                "ports_scanned": args.ports,
+                "target": target,
+                "ip": primary_ip,
+                "all_ips": resolved_ips,
+                "active_ips": active_scanned_ips,
+            }
 
-                # Final Assessment Dashboard Frame
-                liveness_str = f"{ColorCodes.GREEN}ALIVE{ColorCodes.RESET}" if alive else f"{ColorCodes.YELLOW}OFFLINE / UNRESPONSIVE{ColorCodes.RESET}"
-                summary_lines = [
-                    f"Target Assessment  : {ColorCodes.BOLD}{target}{ColorCodes.RESET} ({ip})",
-                    f"Host Liveness      : {liveness_str}",
-                    f"Scan Duration      : {duration}s",
-                    f"Open Services      : {len(findings)} discovered",
-                    f"Total CVEs Found   : {total_cves} (Critical CVSS 9.0+: {crit_count})",
-                    f"CISA KEV Status    : {f'{ColorCodes.BOLD}{ColorCodes.RED}⚠️ {kev_count} ACTIVELY EXPLOITED IN WILD{ColorCodes.RESET}' if kev_count else f'{ColorCodes.GREEN}No known active exploits{ColorCodes.RESET}'}",
-                    f"Zone Transfer Leak : {f'{ColorCodes.BOLD}{ColorCodes.RED}YES (VULNERABLE){ColorCodes.RESET}' if zone_transfer.get('vulnerable') else 'No (Refused)'}",
-                    f"Subdomains Found   : {len(subdomains)} active",
-                    f"Generated Reports  : {', '.join(written_files)}",
-                ]
-                print(draw_frame("ASSESSMENT SUMMARY DASHBOARD", summary_lines, color=ColorCodes.GREEN))
+            written_files = write_report(
+                target=target,
+                ip=primary_ip,
+                ip_addresses=resolved_ips,
+                findings=all_findings,
+                dns_records=dns_records,
+                os_info=all_os_info,
+                alive=target_alive,
+                subdomains=subdomains,
+                zone_transfer=zone_transfer,
+                metadata=metadata,
+                output_path=args.output_file,
+                formats=[args.format],
+            )
+
+            # Count statistics for summary card
+            crit_count = sum(1 for f in all_findings for c in f.get("cves", []) if c.get("severity") == "CRITICAL" or (c.get("cvss") or 0) >= 9.0)
+            kev_count = sum(1 for f in all_findings for c in f.get("cves", []) if c.get("cisa_kev"))
+            total_cves = sum(len(f.get("cves", [])) for f in all_findings)
+
+            # Final Assessment Dashboard Frame
+            liveness_str = f"{ColorCodes.GREEN}ALIVE{ColorCodes.RESET}" if target_alive else f"{ColorCodes.YELLOW}OFFLINE / UNRESPONSIVE{ColorCodes.RESET}"
+            ip_display = ", ".join(active_scanned_ips) if active_scanned_ips else primary_ip
+            summary_lines = [
+                f"Target Assessment  : {ColorCodes.BOLD}{target}{ColorCodes.RESET} ({ip_display})",
+                f"Host Liveness      : {liveness_str}",
+                f"Scan Duration      : {duration}s",
+                f"Open Services      : {len(all_findings)} discovered across scanned IPs",
+                f"Total CVEs Found   : {total_cves} (Critical CVSS 9.0+: {crit_count})",
+                f"CISA KEV Status    : {f'{ColorCodes.BOLD}{ColorCodes.RED}⚠️ {kev_count} ACTIVELY EXPLOITED IN WILD{ColorCodes.RESET}' if kev_count else f'{ColorCodes.GREEN}No known active exploits{ColorCodes.RESET}'}",
+                f"Zone Transfer Leak : {f'{ColorCodes.BOLD}{ColorCodes.RED}YES (VULNERABLE){ColorCodes.RESET}' if zone_transfer.get('vulnerable') else 'No (Refused)'}",
+                f"Subdomains Found   : {len(subdomains)} active",
+                f"Generated Reports  : {', '.join(written_files)}",
+            ]
+            print(draw_frame("ASSESSMENT SUMMARY DASHBOARD", summary_lines, color=ColorCodes.GREEN))
 
         total_time = round(time.time() - start_monotonic, 2)
         print(f"{ColorCodes.GREEN}{ColorCodes.BOLD}[✓] Scan cycle fully completed in {total_time}s.{ColorCodes.RESET}\n")

@@ -179,20 +179,6 @@ def socket_scan(
             fp = perform_deep_http_fingerprint(ip, port, hostname=hostname)
             if fp.get("title") and "Title:" not in banner:
                 banner = f"{banner} | Title: {fp['title']}" if banner else f"Title: {fp['title']}"
-            if fp.get("waf_cdn"):
-                banner = f"{banner} | WAF: {fp['waf_cdn']}"
-            if fp.get("technologies") and not inferred_product:
-                inferred_product = fp["technologies"][0]
-
-        inferred_cpes, inferred_product, inferred_ver = infer_cpe_from_banner(banner, port)
-
-        fp = {}
-        if port in (80, 443, 8080, 8443, 8000, 8888, 3000, 5000, 9443) or svc_name in ("http", "https"):
-            fp = perform_deep_http_fingerprint(ip, port, hostname=hostname)
-            if fp.get("title") and "Title:" not in banner:
-                banner = f"{banner} | Title: {fp['title']}" if banner else f"Title: {fp['title']}"
-            if fp.get("waf_cdn"):
-                banner = f"{banner} | WAF: {fp['waf_cdn']}"
             if fp.get("technologies") and not inferred_product:
                 inferred_product = fp["technologies"][0]
 
@@ -279,8 +265,6 @@ def scan(
                 fp = perform_deep_http_fingerprint(ip, port, hostname=hostname)
                 if fp.get("title") and "Title:" not in banner:
                     banner = f"{banner} | Title: {fp['title']}" if banner else f"Title: {fp['title']}"
-                if fp.get("waf_cdn") and "WAF:" not in banner:
-                    banner = f"{banner} | WAF: {fp['waf_cdn']}"
 
             findings.append({
                 "port": port,
