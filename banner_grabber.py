@@ -3,6 +3,7 @@ Protocol-aware and TLS-capable banner grabbing with concurrent execution.
 """
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import re
 import socket
 import ssl
 from typing import Dict, List, Optional, Set
@@ -25,17 +26,33 @@ def _create_ssl_context() -> ssl.SSLContext:
 
 def _probe_http(sock: socket.socket, host_header: str) -> str:
     """
-    Sends a structured HTTP HEAD request to elicit the Server banner and status code.
+    Sends structured HTTP HEAD (with GET fallback) to elicit status code,
+    Server header, and HTML <title> tag.
     """
-    request = (
+    head_req = (
         f"HEAD / HTTP/1.1\r\n"
         f"Host: {host_header}\r\n"
         f"User-Agent: ReconScanner/1.0\r\n"
         f"Accept: */*\r\n"
         f"Connection: close\r\n\r\n"
     )
-    sock.sendall(request.encode("utf-8", errors="ignore"))
+    sock.sendall(head_req.encode("utf-8", errors="ignore"))
     response = sock.recv(4096).decode("utf-8", errors="ignore")
+
+    # If HEAD is refused, empty, or returns 405 Method Not Allowed, try GET
+    if not response or "405" in response or "400 Bad Request" in response:
+        try:
+            get_req = (
+                f"GET / HTTP/1.1\r\n"
+                f"Host: {host_header}\r\n"
+                f"User-Agent: ReconScanner/1.0\r\n"
+                f"Accept: */*\r\n"
+                f"Connection: close\r\n\r\n"
+            )
+            sock.sendall(get_req.encode("utf-8", errors="ignore"))
+            response = sock.recv(4096).decode("utf-8", errors="ignore")
+        except Exception:
+            pass
 
     if not response:
         return ""
@@ -51,9 +68,21 @@ def _probe_http(sock: socket.socket, host_header: str) -> str:
             server_header = line
             break
 
+    # Extract HTML <title> if present
+    title_str = ""
+    title_match = re.search(r"<title[^>]*>(.*?)</title>", response, re.IGNORECASE | re.DOTALL)
+    if title_match:
+        extracted = " ".join(title_match.group(1).split()).strip()
+        if extracted:
+            title_str = f"Title: {extracted[:45]}"
+
+    parts = [status_line]
     if server_header:
-        return f"{status_line} | {server_header}"
-    return status_line
+        parts.append(server_header)
+    if title_str:
+        parts.append(title_str)
+
+    return " | ".join(parts)
 
 
 def _probe_generic(sock: socket.socket) -> str:
@@ -100,11 +129,20 @@ def grab_banner(
         raw_sock.connect((ip, port))
 
         sock = raw_sock
+        tls_info = ""
         if is_tls:
             try:
                 ssl_ctx = _create_ssl_context()
                 server_name = hostname if hostname and not hostname.replace(".", "").isdigit() else None
                 sock = ssl_ctx.wrap_socket(raw_sock, server_hostname=server_name)
+                try:
+                    ver = sock.version() or ""
+                    cipher = sock.cipher()
+                    cipher_str = cipher[0] if cipher else ""
+                    if ver:
+                        tls_info = f"TLS: {ver}" + (f" ({cipher_str})" if cipher_str else "")
+                except Exception:
+                    pass
             except Exception:
                 # If TLS handshake fails on suspected TLS port, fallback to plain socket
                 raw_sock.close()
@@ -127,6 +165,9 @@ def grab_banner(
                         banner = _probe_http(sock, host_header)
                     except Exception:
                         pass
+
+            if tls_info and is_tls:
+                banner = f"{banner} | {tls_info}" if banner else tls_info
 
             # Clean and truncate if excessively long
             cleaned = banner.replace("\r", " ").replace("\n", " ").strip()

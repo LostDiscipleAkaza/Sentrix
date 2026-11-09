@@ -85,6 +85,18 @@ class TestDNSEnum(unittest.TestCase):
         # Because all dictionary candidates match the wildcard IP, they should be filtered out
         self.assertEqual(subs, {})
 
+    @patch("requests.get")
+    def test_query_hackertarget(self, mock_get):
+        from dns_enum import _query_hackertarget
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.text = "api.example.com,192.168.1.10\nvpn.example.com,192.168.1.20\n"
+        mock_get.return_value = mock_resp
+
+        subs = _query_hackertarget("example.com")
+        self.assertIn("api.example.com", subs)
+        self.assertIn("vpn.example.com", subs)
+
 
 if __name__ == "__main__":
     unittest.main()

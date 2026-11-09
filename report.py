@@ -122,6 +122,42 @@ def _generate_remediations(report_data: Dict[str, Any], summary: Dict[str, Any])
             "description": "Discovered services contain critical/high CVSS vulnerabilities. Update server software packages to latest stable releases and apply security patches.",
         })
 
+    # Deep fingerprinting remediations (TLS & Security Headers)
+    for s in services:
+        sec = s.get("security_headers", {})
+        if sec and sec.get("missing"):
+            missing_names = [m["header"] for m in sec["missing"]]
+            if any("Strict-Transport-Security" in h for h in missing_names) and s.get("port") == 443:
+                remediations.append({
+                    "title": "Enable HTTP Strict Transport Security (HSTS)",
+                    "priority": "HIGH",
+                    "description": "Port 443 is serving HTTPS without an HSTS header. Add 'Strict-Transport-Security: max-age=31536000; includeSubDomains; preload' to prevent SSL-stripping MITM attacks.",
+                })
+            if any("Content-Security-Policy" in h for h in missing_names):
+                remediations.append({
+                    "title": "Implement Content-Security-Policy (CSP)",
+                    "priority": "MEDIUM",
+                    "description": f"Port {s.get('port')} lacks a Content-Security-Policy header. Define a restrictive CSP to prevent cross-site scripting (XSS) and code injection.",
+                })
+            break
+
+    for s in services:
+        cert = s.get("tls_cert")
+        if cert:
+            if cert.get("is_self_signed"):
+                remediations.append({
+                    "title": "Replace Self-Signed TLS Certificate",
+                    "priority": "HIGH",
+                    "description": f"Port {s.get('port')} presents a self-signed or untrusted certificate. Deploy a valid certificate issued by a trusted CA (e.g. Let's Encrypt).",
+                })
+            elif cert.get("is_expired"):
+                remediations.append({
+                    "title": "Renew Expired TLS Certificate",
+                    "priority": "CRITICAL",
+                    "description": f"The TLS certificate on port {s.get('port')} has expired ({cert.get('not_after')}). Renew it immediately.",
+                })
+            break
+
     if not remediations:
         remediations.append({
             "title": "Maintain Baseline Security Hygiene",
@@ -237,6 +273,28 @@ def generate_markdown_report(report_data: Dict[str, Any]) -> str:
         lines.append("*No additional subdomains discovered.*")
 
     lines.append("")
+    lines.append("## Deep Fingerprinting & Web Technologies")
+    lines.append("")
+
+    has_fp = any(s.get("waf_cdn") or s.get("technologies") or s.get("security_headers") or s.get("tls_cert") for s in services)
+    if has_fp:
+        lines.extend([
+            "| Port | WAF / CDN | Technology Stack | Security Headers Score | TLS Cert Details |",
+            "| :--- | :--- | :--- | :--- | :--- |",
+        ])
+        for s in services:
+            if s.get("waf_cdn") or s.get("technologies") or s.get("security_headers") or s.get("tls_cert"):
+                waf = s.get("waf_cdn") or "None detected"
+                tech = ", ".join(s.get("technologies", [])) or "N/A"
+                sec = s.get("security_headers", {})
+                sec_score = f"{sec.get('score')} ({sec.get('grade')})" if sec.get("score") else "N/A"
+                cert = s.get("tls_cert", {})
+                cert_info = f"CN: {cert.get('subject_cn')}, Issuer: {cert.get('issuer')}" if cert else "N/A"
+                lines.append(f"| `{s.get('port')}` | {waf} | {tech} | {sec_score} | {cert_info} |")
+    else:
+        lines.append("*No web services detected for deep fingerprinting.*")
+
+    lines.append("")
     lines.append("## Remediation Guidance")
     lines.append("")
     for rem in remediations:
@@ -327,6 +385,55 @@ def generate_html_report(report_data: Dict[str, Any]) -> str:
             <p class="rem-desc">{rem.get('description')}</p>
         </div>
         """
+
+    deep_fp_cards_html = ""
+    for s in services:
+        if s.get("waf_cdn") or s.get("technologies") or s.get("security_headers") or s.get("tls_cert"):
+            port_proto = f"{s.get('port')}/{s.get('protocol', 'tcp')}"
+            waf_badge = f'<span class="badge-waf">🛡️ WAF/CDN: {s["waf_cdn"]}</span>' if s.get("waf_cdn") else ""
+            
+            tech_badges = "".join(f'<span class="badge-tech">{t}</span>' for t in s.get("technologies", []))
+            if not tech_badges:
+                tech_badges = '<span class="dim">No specific frameworks fingerprinted</span>'
+                
+            tls_html = ""
+            cert = s.get("tls_cert")
+            if cert:
+                days = cert.get("days_until_expiry")
+                days_label = f"{days} days remaining" if days is not None else "N/A"
+                self_signed = ' <span class="badge-critical">SELF-SIGNED</span>' if cert.get("is_self_signed") else ""
+                sans_str = ", ".join(cert.get("sans", [])[:5]) or "None"
+                tls_html = f"""
+                <div style="margin-top: 10px; font-size: 13px; background: rgba(0,0,0,0.25); padding: 10px; border-radius: 6px;">
+                    <div><strong>TLS Certificate:</strong> CN: <code>{cert.get('subject_cn')}</code>{self_signed} | Issuer: <code>{cert.get('issuer')}</code> | Expiry: {days_label}</div>
+                    <div style="margin-top: 4px; color: var(--text-muted); font-size: 12px;">Subject Alt Names (SANs): <code>{sans_str}</code></div>
+                </div>
+                """
+                
+            sec_html = ""
+            sec = s.get("security_headers")
+            if sec and sec.get("score"):
+                grade = sec.get("grade", "F")
+                grade_cls = f"grade-{grade.lower()}"
+                missing_items = "".join(f"<li><strong>{m['header']}:</strong> {m['description']}</li>" for m in sec.get("missing", [])[:3])
+                sec_html = f"""
+                <div style="margin-top: 10px; font-size: 13px; background: rgba(0,0,0,0.25); padding: 10px; border-radius: 6px;">
+                    <div><strong>Defensive Security Headers:</strong> <span class="badge-grade {grade_cls}">Grade {grade} ({sec.get('score')})</span></div>
+                    {f'<ul style="margin-left: 20px; margin-top: 6px; color: var(--text-muted); font-size: 12px;">{missing_items}</ul>' if missing_items else '<div style="color: #10b981; font-size: 12px; margin-top: 4px;">All recommended security headers configured.</div>'}
+                </div>
+                """
+
+            deep_fp_cards_html += f"""
+            <div class="remediation-card" style="border-left: 5px solid #818cf8; margin-bottom: 15px;">
+                <div class="rem-header" style="display: flex; justify-content: space-between; align-items: center;">
+                    <span style="font-weight: bold; font-size: 16px;">Port {port_proto} ({s.get('service', 'http')})</span>
+                    {waf_badge}
+                </div>
+                <div style="margin-top: 8px;"><strong>Technologies:</strong> {tech_badges}</div>
+                {tls_html}
+                {sec_html}
+            </div>
+            """
 
     axfr_alert_html = ""
     if zone_transfer.get("vulnerable"):
@@ -423,6 +530,13 @@ def generate_html_report(report_data: Dict[str, Any]) -> str:
         .alert-box {{ padding: 18px; border-radius: 8px; margin-bottom: 20px; }}
         .alert-critical {{ background: rgba(239, 68, 68, 0.15); border: 1px solid var(--critical); color: #fca5a5; }}
         .alert-box h3 {{ color: #fff; margin-bottom: 6px; }}
+        .badge-waf {{ background: rgba(168, 85, 247, 0.2); color: #c084fc; border: 1px solid #a855f7; padding: 3px 8px; border-radius: 4px; font-weight: 700; font-size: 11px; }}
+        .badge-tech {{ background: rgba(99, 102, 241, 0.2); color: #818cf8; padding: 2px 7px; border-radius: 4px; font-size: 11px; margin-right: 5px; display: inline-block; margin-top: 3px; }}
+        .badge-grade {{ padding: 3px 8px; border-radius: 4px; font-weight: 800; font-size: 11px; }}
+        .grade-a {{ background: rgba(16, 185, 129, 0.2); color: #10b981; }}
+        .grade-b {{ background: rgba(56, 189, 248, 0.2); color: #38bdf8; }}
+        .grade-c {{ background: rgba(245, 158, 11, 0.2); color: #f59e0b; }}
+        .grade-f {{ background: rgba(239, 68, 68, 0.2); color: #ef4444; }}
         .dim {{ color: #64748b; font-style: italic; }}
     </style>
 </head>
@@ -490,6 +604,13 @@ def generate_html_report(report_data: Dict[str, Any]) -> str:
                     {services_rows_html if services_rows_html else '<tr><td colspan="6" class="dim">No open services discovered.</td></tr>'}
                 </tbody>
             </table>
+        </div>
+
+        <div class="section">
+            <div class="section-title">Deep Fingerprinting & Web Technologies</div>
+            <div>
+                {deep_fp_cards_html if deep_fp_cards_html else '<div class="dim">No web or TLS services fingerprinted.</div>'}
+            </div>
         </div>
 
         <div class="section">

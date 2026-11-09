@@ -50,17 +50,22 @@ def resolve(target: str) -> List[str]:
     return resolved_ips
 
 
-def expand_cidr(cidr_str: str) -> List[str]:
+def expand_cidr(cidr_str: str, max_hosts: int = 1024) -> List[str]:
     """
     Expands an IPv4 or IPv6 CIDR block (e.g. '192.168.1.0/24') into host IP strings.
     For single host prefixes (/32 or /128), returns the single IP.
+    Enforces a safety maximum (default: 1024 hosts) to prevent out-of-memory stalls on large subnets.
     """
     try:
         network = ipaddress.ip_network(cidr_str.strip(), strict=False)
         if network.num_addresses == 1:
             return [str(network.network_address)]
-        # For small or standard subnets, return all usable host addresses
-        return [str(ip) for ip in network.hosts()]
+        hosts = []
+        for i, ip in enumerate(network.hosts()):
+            if i >= max_hosts:
+                break
+            hosts.append(str(ip))
+        return hosts
     except ValueError:
         return []
 

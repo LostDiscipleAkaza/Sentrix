@@ -44,6 +44,7 @@ def check_cves(finding: Dict[str, Any]) -> Dict[str, Any]:
     finding["cves"] = result.get("cves", [])
     finding["cve_reason"] = result.get("reason")
     finding["cve_source"] = result.get("source")
+    finding["version_unspecified"] = result.get("version_unspecified", False)
     return finding
 
 
@@ -58,6 +59,25 @@ def print_finding(finding: Dict[str, Any]) -> None:
     print(f"  {ColorCodes.GREEN}►{ColorCodes.RESET} Service : {svc_str} on Port {port_str} {ColorCodes.DIM}({info}){ColorCodes.RESET}")
     if finding.get("banner"):
         print(f"    Banner  : {ColorCodes.DIM}{finding['banner'][:100]}{ColorCodes.RESET}")
+
+    if finding.get("waf_cdn"):
+        print(f"    {ColorCodes.BOLD}{ColorCodes.MAGENTA}WAF/CDN :{ColorCodes.RESET} {finding['waf_cdn']}")
+
+    if finding.get("technologies"):
+        print(f"    {ColorCodes.CYAN}Stack   :{ColorCodes.RESET} {', '.join(finding['technologies'])}")
+
+    if finding.get("security_headers") and finding["security_headers"].get("score"):
+        sec = finding["security_headers"]
+        missing_names = [m["header"].split()[0] for m in sec.get("missing", [])[:4]]
+        missing_str = f"Missing: {', '.join(missing_names)}" if missing_names else "All recommended headers present"
+        print(f"    {ColorCodes.YELLOW}Headers :{ColorCodes.RESET} OWASP Score {sec.get('score')} (Grade {sec.get('grade')}) - {missing_str}")
+
+    if finding.get("tls_cert") and finding["tls_cert"].get("issuer"):
+        cert = finding["tls_cert"]
+        days = cert.get("days_until_expiry")
+        days_str = f"{days} days" if days is not None else "N/A"
+        self_signed_badge = f" {ColorCodes.RED}[SELF-SIGNED]{ColorCodes.RESET}" if cert.get("is_self_signed") else ""
+        print(f"    {ColorCodes.DIM}TLS Cert:{ColorCodes.RESET} CN={cert.get('subject_cn')}{self_signed_badge} | Issuer={cert.get('issuer')} | Expiry: {days_str}")
 
     status = finding.get("cve_status")
     cves = finding.get("cves", [])
@@ -80,6 +100,8 @@ def print_finding(finding: Dict[str, Any]) -> None:
 
         source = finding.get("cve_source", "nvd")
         print(f"    {ColorCodes.RED}CVEs [{source}]:{ColorCodes.RESET} {len(cves)} found -> {', '.join(shown_items)}")
+        if finding.get("version_unspecified"):
+            print(f"        {ColorCodes.YELLOW}[i] Note: Exact version was not fingerprinted; CVEs cover the general software family.{ColorCodes.RESET}")
         if len(cves) > len(top):
             print(f"        {ColorCodes.DIM}...and {len(cves) - len(top)} more documented in report files{ColorCodes.RESET}")
     elif status == "unmatched":
@@ -273,12 +295,54 @@ def main() -> None:
                 if not args.no_ping:
                     logger.info(f"Checking host availability for {ip} (ICMP + TCP ping)...")
                     alive = is_host_alive(ip)
-                    status_str = f"{ColorCodes.GREEN}ALIVE{ColorCodes.RESET}" if alive else f"{ColorCodes.YELLOW}UNRESPONSIVE TO PING (proceeding anyway){ColorCodes.RESET}"
-                    print(f"  [{'+' if alive else '-'}] Host {ip} status: {status_str}")
+                    if not alive:
+                        print(f"  [-] Host {ip} is {ColorCodes.YELLOW}OFFLINE / UNRESPONSIVE{ColorCodes.RESET} to ICMP & TCP probes.")
+                        print(f"      {ColorCodes.DIM}(Skipping port scan for this IP. Pass --no-ping to force full scan){ColorCodes.RESET}")
+                        draw_section_footer()
+
+                        # Write report indicating host offline
+                        write_report(
+                            target=target,
+                            ip=ip,
+                            ip_addresses=resolved_ips,
+                            findings=[],
+                            dns_records=dns_records,
+                            os_info=[],
+                            alive=False,
+                            subdomains=subdomains,
+                            zone_transfer=zone_transfer,
+                            metadata={
+                                "scanner_version": "Reconnoiter 2.0.0",
+                                "command_line_args": " ".join(sys.argv[1:]),
+                                "scan_start_time": scan_start_timestamp,
+                                "scan_end_time": current_timestamp(),
+                                "scan_duration_seconds": round(time.time() - start_monotonic, 2),
+                                "ports_scanned": args.ports,
+                                "target": target,
+                                "ip": ip,
+                            },
+                            output_path=args.output_file,
+                            formats=[args.format],
+                        )
+                        continue
+                    else:
+                        print(f"  [+] Host {ip} status: {ColorCodes.GREEN}ALIVE{ColorCodes.RESET}")
 
                 # Port & Service scan
                 logger.info(f"Scanning ports [{args.ports}] on {ip}...")
                 findings, os_info = scan(ip, port_spec=args.ports, hostname=target if is_domain else None)
+
+                # Harvest TLS SAN hostnames into subdomains
+                if is_domain:
+                    for f in findings:
+                        cert = f.get("tls_cert")
+                        if cert and cert.get("sans"):
+                            for san in cert["sans"]:
+                                san_clean = san.lower().strip()
+                                if san_clean.startswith("*."):
+                                    san_clean = san_clean[2:]
+                                if (san_clean.endswith(f".{target.lower()}") or san_clean == target.lower()) and san_clean not in subdomains:
+                                    subdomains[san_clean] = [ip]
 
                 if os_info:
                     print(f"  {ColorCodes.GREEN}[+]{ColorCodes.RESET} OS Detection matches:")

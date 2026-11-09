@@ -32,6 +32,7 @@ py-modules = [
     "cve_lookup",
     "dns_enum",
     "report",
-    "utils"
+    "utils",
+    "fingerprint"
 ]
 

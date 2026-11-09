@@ -148,6 +148,40 @@ def _query_crtsh(domain: str) -> Set[str]:
     return subdomains
 
 
+def _query_hackertarget(domain: str) -> Set[str]:
+    """
+    Queries HackerTarget free hostsearch API as a secondary passive discovery source.
+    """
+    subdomains: Set[str] = set()
+    url = f"https://api.hackertarget.com/hostsearch/?q={domain}"
+    headers = {"User-Agent": "ReconScanner/1.0"}
+    try:
+        r = requests.get(url, headers=headers, timeout=8)
+        if r.status_code == 200 and not r.text.startswith("error"):
+            for line in r.text.splitlines():
+                if "," in line:
+                    host = line.split(",")[0].strip().lower()
+                    if host.endswith(f".{domain.lower()}") or host == domain.lower():
+                        subdomains.add(host)
+    except Exception as e:
+        logger.debug(f"HackerTarget passive discovery error: {e}")
+    return subdomains
+
+
+def _query_passive_sources(domain: str) -> Set[str]:
+    """Queries crt.sh Certificate Transparency logs and HackerTarget in parallel."""
+    subdomains: Set[str] = set()
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        f_crtsh = executor.submit(_query_crtsh, domain)
+        f_ht = executor.submit(_query_hackertarget, domain)
+        for f in (f_crtsh, f_ht):
+            try:
+                subdomains.update(f.result())
+            except Exception:
+                continue
+    return subdomains
+
+
 def _resolve_subdomain(subdomain: str) -> List[str]:
     """Resolves A and AAAA records for a given subdomain."""
     ips = []
@@ -192,9 +226,9 @@ def enumerate_subdomains(
     candidate_subdomains: Set[str] = set()
     ct_subdomains: Set[str] = set()
 
-    # 1. Passive Certificate Transparency lookup
+    # 1. Passive Certificate Transparency & OSINT lookup
     if use_crtsh:
-        ct_subdomains = _query_crtsh(domain)
+        ct_subdomains = _query_passive_sources(domain)
         candidate_subdomains.update(ct_subdomains)
 
     # 2. Dictionary-based candidates

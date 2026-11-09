@@ -48,6 +48,10 @@ class TestResolver(unittest.TestCase):
         single = expand_cidr("10.0.0.5/32")
         self.assertEqual(single, ["10.0.0.5"])
 
+        # Test max_hosts safety capping on large subnet
+        capped = expand_cidr("10.0.0.0/16", max_hosts=10)
+        self.assertEqual(len(capped), 10)
+
     def test_expand_ip_range(self):
         ips = expand_ip_range("192.168.1.1-192.168.1.4")
         self.assertEqual(ips, ["192.168.1.1", "192.168.1.2", "192.168.1.3", "192.168.1.4"])

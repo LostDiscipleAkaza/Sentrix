@@ -26,6 +26,17 @@ class TestBannerGrabber(unittest.TestCase):
         self.assertIn("HTTP/1.1 200 OK", banner)
         self.assertIn("Server: nginx/1.24.0 (Ubuntu)", banner)
 
+    def test_probe_http_with_title(self):
+        mock_sock = MagicMock()
+        http_response = (
+            b"HTTP/1.1 200 OK\r\n"
+            b"Server: Apache/2.4.52\r\n\r\n"
+            b"<html><head><title>Admin Portal</title></head><body>Hello</body></html>"
+        )
+        mock_sock.recv.return_value = http_response
+        banner = _probe_http(mock_sock, "portal.local")
+        self.assertIn("Title: Admin Portal", banner)
+
     def test_probe_generic_immediate(self):
         mock_sock = MagicMock()
         mock_sock.recv.return_value = b"SSH-2.0-OpenSSH_8.9p1 Ubuntu-3ubuntu0.6\r\n"

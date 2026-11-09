@@ -473,7 +473,10 @@ def lookup_by_cpe(cpe23: Optional[str]) -> Dict[str, Any]:
         seen.values(),
         key=lambda c: (c["cvss"] is None, -(c["cvss"] or 0)),
     )
-    return {"status": "matched", "cves": cves, "source": "nvd"}
+    res = {"status": "matched", "cves": cves, "source": "nvd"}
+    if "*" in cpe23:
+        res["version_unspecified"] = True
+    return res
 
 
 def _parse_circl_entry(item: Any) -> Optional[Dict[str, Any]]:

@@ -87,5 +87,5 @@ def is_host_alive(
         return True
 
     # 2. Fallback probe: TCP Connect against common ports
-    candidate_ports = tcp_ports if tcp_ports is not None else [80, 443, 22]
+    candidate_ports = tcp_ports if tcp_ports is not None else [80, 443, 22, 8080, 445, 3389]
     return tcp_ping_multi(ip, candidate_ports, timeout=min(timeout, 1.5))

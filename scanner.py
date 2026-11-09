@@ -4,10 +4,12 @@ Port and service scanner integrating nmap with socket-based fallback and concurr
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
+import re
 import socket
 from typing import Any, Dict, List, Optional, Tuple
 
 from banner_grabber import grab_banners_concurrent
+from fingerprint import perform_deep_http_fingerprint
 from utils import safe_get
 
 logger = logging.getLogger("reconnoiter")
@@ -16,12 +18,71 @@ try:
     import nmap
     _HAS_NMAP = True
 except ImportError:
+    nmap = None
     _HAS_NMAP = False
 
 COMMON_TOP_PORTS = [
     21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 143, 443, 445, 993, 995,
     1723, 3306, 3389, 5900, 8080, 8443, 8000, 8888, 27017, 5432, 6379
 ]
+
+
+def infer_cpe_from_banner(banner: str, port: int = 0) -> Tuple[List[str], str, str]:
+    """
+    Infers (cpe_list, product, version) from raw service banners.
+    Enables native socket scans to look up CVEs even without Nmap installed.
+    """
+    if not banner:
+        return [], "", ""
+
+    patterns = [
+        # Apache HTTP Server: Apache/2.4.49, Apache/2.4.52 (Ubuntu)
+        (r"Apache(?:/([0-9\.]+))?", "apache", "http_server", "Apache httpd"),
+        # Nginx: nginx/1.18.0
+        (r"nginx(?:/([0-9\.]+))?", "igor_sysoev", "nginx", "nginx"),
+        # OpenSSH: SSH-2.0-OpenSSH_8.9p1
+        (r"OpenSSH(?:_([0-9\.]+(?:p[0-9]+)?))?", "openbsd", "openssh", "OpenSSH"),
+        # Dropbear SSH: dropbear_2020.81
+        (r"dropbear(?:_([0-9\.]+))?", "dropbear_ssh_project", "dropbear_ssh", "Dropbear SSH"),
+        # vsftpd: vsFTPd 3.0.3
+        (r"vsFTPd(?:[\s/]([0-9\.]+))?", "vsftpd", "vsftpd", "vsftpd"),
+        # ProFTPD: ProFTPD 1.3.5
+        (r"ProFTPD(?:[\s/]([0-9\.]+))?", "proftpd", "proftpd", "ProFTPD"),
+        # Pure-FTPd
+        (r"Pure-FTPd", "pureftpd", "pure-ftpd", "Pure-FTPd"),
+        # Lighttpd: lighttpd/1.4.59
+        (r"lighttpd(?:/([0-9\.]+))?", "lighttpd", "lighttpd", "lighttpd"),
+        # Microsoft IIS: Microsoft-IIS/10.0
+        (r"Microsoft-IIS(?:/([0-9\.]+))?", "microsoft", "internet_information_services", "Microsoft IIS"),
+        # MySQL: 5.7.34, 8.0.28
+        (r"(?:MySQL|mysql)[-_]?([0-9\.]+)?", "oracle", "mysql", "MySQL"),
+        # MariaDB: 10.3.34-MariaDB
+        (r"([0-9\.]+)-MariaDB", "mariadb", "mariadb", "MariaDB"),
+        # PostgreSQL: PostgreSQL 14.1
+        (r"PostgreSQL(?:[\s/]([0-9\.]+))?", "postgresql", "postgresql", "PostgreSQL"),
+        # Exim: Exim 4.94.2
+        (r"Exim(?:[\s/]([0-9\.]+))?", "exim", "exim", "Exim"),
+        # Postfix
+        (r"Postfix", "postfix", "postfix", "Postfix"),
+        # PHP: PHP/7.4.3
+        (r"PHP/([0-9\.]+)", "php", "php", "PHP"),
+        # Node.js Express
+        (r"Express", "expressjs", "express", "Express"),
+        # OpenSSL: OpenSSL/1.1.1f
+        (r"OpenSSL/([0-9\.]+[a-z]?)", "openssl", "openssl", "OpenSSL"),
+    ]
+
+    for regex, vendor, product, display_name in patterns:
+        match = re.search(regex, banner, re.IGNORECASE)
+        if match:
+            version = match.group(1) if match.groups() and match.group(1) else ""
+            if version:
+                cpe = f"cpe:/a:{vendor}:{product}:{version}"
+            else:
+                cpe = f"cpe:/a:{vendor}:{product}"
+            return [cpe], display_name, version
+
+    return [], "", ""
 
 
 def _socket_probe_port(ip: str, port: int, timeout: float = 1.0) -> bool:
@@ -111,16 +172,45 @@ def socket_scan(
         elif port == 5432:
             svc_name = "postgresql"
 
+        inferred_cpes, inferred_product, inferred_ver = infer_cpe_from_banner(banner, port)
+
+        fp = {}
+        if port in (80, 443, 8080, 8443, 8000, 8888, 3000, 5000, 9443) or svc_name in ("http", "https"):
+            fp = perform_deep_http_fingerprint(ip, port, hostname=hostname)
+            if fp.get("title") and "Title:" not in banner:
+                banner = f"{banner} | Title: {fp['title']}" if banner else f"Title: {fp['title']}"
+            if fp.get("waf_cdn"):
+                banner = f"{banner} | WAF: {fp['waf_cdn']}"
+            if fp.get("technologies") and not inferred_product:
+                inferred_product = fp["technologies"][0]
+
+        inferred_cpes, inferred_product, inferred_ver = infer_cpe_from_banner(banner, port)
+
+        fp = {}
+        if port in (80, 443, 8080, 8443, 8000, 8888, 3000, 5000, 9443) or svc_name in ("http", "https"):
+            fp = perform_deep_http_fingerprint(ip, port, hostname=hostname)
+            if fp.get("title") and "Title:" not in banner:
+                banner = f"{banner} | Title: {fp['title']}" if banner else f"Title: {fp['title']}"
+            if fp.get("waf_cdn"):
+                banner = f"{banner} | WAF: {fp['waf_cdn']}"
+            if fp.get("technologies") and not inferred_product:
+                inferred_product = fp["technologies"][0]
+
         findings.append({
             "port": port,
             "protocol": "tcp",
             "service": svc_name,
-            "product": "",
-            "version": "",
+            "product": inferred_product,
+            "version": inferred_ver,
             "extra_info": "",
-            "cpes": [],
+            "cpes": inferred_cpes,
             "banner": banner,
             "cves": [],
+            "waf_cdn": fp.get("waf_cdn"),
+            "technologies": fp.get("technologies", []),
+            "security_headers": fp.get("security_headers", {}),
+            "tls_cert": fp.get("tls_cert"),
+            "title": fp.get("title", ""),
         })
 
     return findings, []
@@ -138,7 +228,7 @@ def scan(
     findings: List[Dict[str, Any]] = []
     os_info: List[Dict[str, Any]] = []
 
-    if not _HAS_NMAP:
+    if not _HAS_NMAP or nmap is None:
         logger.debug("nmap module not installed. Falling back to native socket scanner.")
         return socket_scan(ip, port_spec, hostname)
 
@@ -182,17 +272,31 @@ def scan(
 
             cpe_entry = safe_get(svc, "cpe", [])
             cpes = [cpe_entry] if isinstance(cpe_entry, str) else cpe_entry
+            svc_name = safe_get(svc, "name", "unknown")
+
+            fp = {}
+            if port in (80, 443, 8080, 8443, 8000, 8888, 3000, 5000, 9443) or "http" in svc_name:
+                fp = perform_deep_http_fingerprint(ip, port, hostname=hostname)
+                if fp.get("title") and "Title:" not in banner:
+                    banner = f"{banner} | Title: {fp['title']}" if banner else f"Title: {fp['title']}"
+                if fp.get("waf_cdn") and "WAF:" not in banner:
+                    banner = f"{banner} | WAF: {fp['waf_cdn']}"
 
             findings.append({
                 "port": port,
                 "protocol": "tcp",
-                "service": safe_get(svc, "name", "unknown"),
+                "service": svc_name,
                 "product": safe_get(svc, "product", ""),
                 "version": safe_get(svc, "version", ""),
                 "extra_info": safe_get(svc, "extrainfo", ""),
                 "cpes": cpes,
                 "banner": banner,
                 "cves": [],
+                "waf_cdn": fp.get("waf_cdn"),
+                "technologies": fp.get("technologies", []),
+                "security_headers": fp.get("security_headers", {}),
+                "tls_cert": fp.get("tls_cert"),
+                "title": fp.get("title", ""),
             })
 
         return findings, os_info
