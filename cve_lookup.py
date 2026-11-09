@@ -109,6 +109,12 @@ def get_cached_cpe(
                 if now - cached_at <= ttl_seconds:
                     try:
                         cves = json.loads(cves_json)
+                        # Self-healing: if cached CVEs contain Ping of Death for non-ICMP products, evict immediately
+                        vendor, product = cpe22_vendor_product(cpe)
+                        if any(c.get("id") == "CVE-1999-0128" for c in cves) and product not in ("linux_kernel", "tcp_ip", "icmp"):
+                            cursor.execute("DELETE FROM cpe_cache WHERE cpe = ?", (cpe,))
+                            return None
+
                         return {
                             "status": status,
                             "source": source,
@@ -472,20 +478,17 @@ def lookup_by_cpe(cpe23: Optional[str]) -> Dict[str, Any]:
 
     seen = {}
     product_clean = product.lower().replace("_", "")
-    vendor_clean = vendor.lower().replace("_", "")
 
     for item in data.get("vulnerabilities", []):
         cve_obj = item.get("cve", {})
 
         # Validation: Protect against NVD returning default unfiltered feed (e.g. Ping of Death from 1999)
-        # Verify that either the CVE configurations or descriptions relate to the requested product/vendor
+        # Verify that either the CVE configurations or descriptions relate strictly to the requested product
         if product_clean:
             descs = " ".join(d.get("value", "").lower() for d in cve_obj.get("descriptions", []))
             configs_str = json.dumps(cve_obj.get("configurations", [])).lower()
             if product_clean not in descs and product.lower() not in descs and product_clean not in configs_str:
-                # If neither product nor vendor appears anywhere in the CVE record, reject as false positive
-                if vendor_clean not in descs and vendor_clean not in configs_str:
-                    continue
+                continue
 
         entry = _parse_cve_entry(item)
         if entry.get("id"):
@@ -554,7 +557,22 @@ def lookup_by_vendor_product(vendor: Optional[str], product: Optional[str]) -> D
     except ValueError:
         return {"status": "error", "cves": [], "reason": "invalid_json_response"}
 
-    items = data if isinstance(data, list) else data.get("results", data.get("data", []))
+    items = []
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        results_val = data.get("results", data.get("data", []))
+        if isinstance(results_val, list):
+            items = results_val
+        elif isinstance(results_val, dict):
+            # Format: {'nvd': [['cve-id', cve_dict], ...]}
+            for key, val_list in results_val.items():
+                if isinstance(val_list, list):
+                    for pair in val_list:
+                        if isinstance(pair, list) and len(pair) > 1 and isinstance(pair[1], dict):
+                            items.append(pair[1])
+                        elif isinstance(pair, dict):
+                            items.append(pair)
 
     seen = {}
     for item in items:

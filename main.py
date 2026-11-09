@@ -27,7 +27,7 @@ from utils import (
 )
 
 
-def check_cves(finding: Dict[str, Any]) -> Dict[str, Any]:
+def check_cves(finding: Dict[str, Any], bypass_cache: bool = False) -> Dict[str, Any]:
     """
     Resolves a scanner finding's CPE (if any) and looks up CVEs.
     Enriches with EPSS probabilities and CISA Known Exploited Vulnerability status.
@@ -36,7 +36,7 @@ def check_cves(finding: Dict[str, Any]) -> Dict[str, Any]:
     cpe_str = (cpe[0] if isinstance(cpe, list) and cpe else cpe) if cpe else None
 
     if cpe_str:
-        result = lookup_cves(cpe_str)
+        result = lookup_cves(cpe_str, bypass_cache=bypass_cache)
     else:
         result = {"status": "unmatched", "cves": [], "reason": "no_cpe_from_nmap"}
 
@@ -180,6 +180,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--no-cve",
         action="store_true",
         help="Skip CVE vulnerability matching",
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="Bypass local SQLite CVE cache to force fresh threat intelligence queries",
     )
     parser.add_argument(
         "--threads",
@@ -371,7 +376,7 @@ def main() -> None:
                     for finding in findings:
                         finding["ip"] = ip
                         if not args.no_cve:
-                            check_cves(finding)
+                            check_cves(finding, bypass_cache=args.no_cache)
                         print_finding(finding)
                     draw_section_footer()
 
