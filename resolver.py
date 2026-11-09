@@ -6,6 +6,89 @@ import ipaddress
 import os
 import socket
 from typing import Dict, List, Optional, Set
+from urllib.parse import urlparse
+
+
+def clean_target(spec: str) -> str:
+    """
+    Sanitizes target inputs (URLs, paths, schemes, ports) into clean hostnames or IPs.
+    Handles:
+      - Full URLs with schemes: 'https://cysclub.tech', 'http://192.168.1.1:8080/path?q=1'
+      - Slashed domain inputs: 'cysclub.tech/', 'example.com/api'
+      - Bracketed IPv6: '[2001:db8::1]' or '[2001:db8::1]:8080'
+    Leaves valid CIDR notations ('192.168.1.0/24') and IP ranges ('1.1.1.1-10') intact.
+    """
+    spec = spec.strip().strip("'\"")
+    if not spec:
+        return ""
+
+    # 1. URL schemes (http://, https://, ftp://, etc.)
+    if "://" in spec:
+        try:
+            parsed = urlparse(spec)
+            if parsed.hostname:
+                return parsed.hostname
+        except Exception:
+            pass
+
+    # 2. Bracketed IPv6: '[2001:db8::1]' or '[2001:db8::1]:8080'
+    if spec.startswith("[") and "]" in spec:
+        end_idx = spec.find("]")
+        return spec[1:end_idx]
+
+    # 3. Check for CIDR block (e.g. 192.168.1.0/24 or 2001:db8::/64)
+    if "/" in spec:
+        try:
+            ipaddress.ip_network(spec, strict=False)
+            return spec  # Valid CIDR notation
+        except ValueError:
+            # Not a CIDR notation: user passed "example.com/" or "example.com/path"
+            try:
+                parsed = urlparse(f"http://{spec}")
+                if parsed.hostname:
+                    return parsed.hostname
+            except Exception:
+                pass
+            spec = spec.split("/", 1)[0].strip()
+
+    # 4. Check for host:port or ipv4:port (e.g. 'cysclub.tech:8080' or '192.168.1.1:8080')
+    # Single colon check prevents corrupting IPv6 addresses (which contain >= 2 colons)
+    if spec.count(":") == 1 and not spec.startswith(":") and not spec.endswith(":"):
+        host_part, port_part = spec.split(":", 1)
+        if port_part.isdigit():
+            return host_part
+
+    return spec
+
+
+def extract_target_port(spec: str) -> Optional[int]:
+    """
+    Extracts an explicit port from a URL or host:port specifier if provided, e.g.:
+      - 'https://example.com:8443' -> 8443
+      - 'http://127.0.0.1:3000' -> 3000
+      - 'example.com:8080' -> 8080
+    Returns None if no explicit port is specified.
+    """
+    spec = spec.strip().strip("'\"")
+    if "://" in spec:
+        try:
+            parsed = urlparse(spec)
+            if parsed.port:
+                return parsed.port
+        except Exception:
+            pass
+
+    if spec.startswith("[") and "]:" in spec:
+        port_part = spec.split("]:", 1)[1]
+        if port_part.isdigit():
+            return int(port_part)
+
+    if spec.count(":") == 1 and not spec.startswith(":") and not spec.endswith(":"):
+        _, port_part = spec.split(":", 1)
+        if port_part.isdigit():
+            return int(port_part)
+
+    return None
 
 
 def is_ip_address(val: str) -> bool:
@@ -20,10 +103,11 @@ def is_ip_address(val: str) -> bool:
 def resolve(target: str) -> List[str]:
     """
     Resolves a hostname to all associated IPv4 and IPv6 addresses using socket.getaddrinfo().
+    If target is a URL or contains paths/schemes, it is automatically sanitized.
     If target is already an IP address, returns a list containing only that IP.
     Returns an empty list if resolution fails or input is invalid.
     """
-    target = target.strip()
+    target = clean_target(target)
     if not target:
         return []
 
@@ -123,25 +207,32 @@ def expand_ip_range(range_str: str) -> List[str]:
 def parse_target_specifier(spec: str) -> List[str]:
     """
     Parses a single target specifier which may be:
+    - URL ('https://cysclub.tech' or 'http://example.com/path')
     - CIDR notation ('192.168.1.0/24')
     - IP range ('192.168.1.1-192.168.1.10')
-    - Single IP ('192.168.1.1')
+    - Single IP ('192.168.1.1' or '2001:db8::1')
     - Hostname / domain ('example.com')
     Returns a list of target items (IPs or hostnames).
     """
-    spec = spec.strip()
+    spec = spec.strip().strip("'\"")
     if not spec:
         return []
 
-    if "/" in spec:
-        return expand_cidr(spec)
+    cleaned = clean_target(spec)
+    if not cleaned:
+        return []
 
-    if "-" in spec and not spec.startswith("-"):
-        range_ips = expand_ip_range(spec)
+    if "/" in cleaned:
+        cidr_ips = expand_cidr(cleaned)
+        if cidr_ips:
+            return cidr_ips
+
+    if "-" in cleaned and not cleaned.startswith("-"):
+        range_ips = expand_ip_range(cleaned)
         if range_ips:
             return range_ips
 
-    return [spec]
+    return [cleaned]
 
 
 def parse_targets_file(filepath: str) -> List[str]:

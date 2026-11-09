@@ -5,8 +5,10 @@ import unittest
 from unittest.mock import patch
 
 from resolver import (
+    clean_target,
     expand_cidr,
     expand_ip_range,
+    extract_target_port,
     is_ip_address,
     parse_target_specifier,
     parse_targets_file,
@@ -59,7 +61,45 @@ class TestResolver(unittest.TestCase):
         short_range = expand_ip_range("10.0.0.8-10")
         self.assertEqual(short_range, ["10.0.0.8", "10.0.0.9", "10.0.0.10"])
 
+    def test_clean_target(self):
+        # Full URLs with schemes
+        self.assertEqual(clean_target("https://cysclub.tech"), "cysclub.tech")
+        self.assertEqual(clean_target("http://cysclub.tech/"), "cysclub.tech")
+        self.assertEqual(clean_target("https://cysclub.tech:8443/api/v1?token=123"), "cysclub.tech")
+        self.assertEqual(clean_target("http://192.168.1.100:8080/dashboard"), "192.168.1.100")
+
+        # Slashed domains & paths without scheme
+        self.assertEqual(clean_target("cysclub.tech/"), "cysclub.tech")
+        self.assertEqual(clean_target("example.com/about.html"), "example.com")
+
+        # Host:port without scheme
+        self.assertEqual(clean_target("cysclub.tech:8080"), "cysclub.tech")
+        self.assertEqual(clean_target("127.0.0.1:3000"), "127.0.0.1")
+
+        # Bracketed IPv6
+        self.assertEqual(clean_target("[2001:db8::1]"), "2001:db8::1")
+        self.assertEqual(clean_target("[2001:db8::1]:8080"), "2001:db8::1")
+
+        # Valid CIDRs and ranges should NOT be stripped
+        self.assertEqual(clean_target("192.168.1.0/24"), "192.168.1.0/24")
+        self.assertEqual(clean_target("2001:db8::/64"), "2001:db8::/64")
+        self.assertEqual(clean_target("192.168.1.1-10"), "192.168.1.1-10")
+
+    def test_extract_target_port(self):
+        self.assertEqual(extract_target_port("https://cysclub.tech:8443"), 8443)
+        self.assertEqual(extract_target_port("http://127.0.0.1:3000/app"), 3000)
+        self.assertEqual(extract_target_port("cysclub.tech:8080"), 8080)
+        self.assertIsNone(extract_target_port("https://cysclub.tech"))
+        self.assertIsNone(extract_target_port("192.168.1.1"))
+
     def test_parse_target_specifier(self):
+        # URLs
+        url_res = parse_target_specifier("https://cysclub.tech")
+        self.assertEqual(url_res, ["cysclub.tech"])
+
+        url_slash_res = parse_target_specifier("http://cysclub.tech/")
+        self.assertEqual(url_slash_res, ["cysclub.tech"])
+
         cidr_res = parse_target_specifier("192.168.1.0/30")
         self.assertEqual(len(cidr_res), 2)
 

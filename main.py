@@ -13,7 +13,7 @@ from cve_lookup import lookup_cves
 from dns_enum import enumerate_dns, enumerate_subdomains, reverse_dns, test_zone_transfer
 from host_discovery import is_host_alive
 from report import write_report
-from resolver import is_ip_address, resolve_all_targets
+from resolver import extract_target_port, is_ip_address, resolve_all_targets
 from scanner import scan
 from utils import (
     ColorCodes,
@@ -214,6 +214,17 @@ def main() -> None:
         except Exception as e:
             logger.error(f"Failed to process targets: {e}")
             sys.exit(1)
+
+        # Detect if any target specified an explicit port (e.g. https://cysclub.tech:8443)
+        if args.targets:
+            for raw_spec in args.targets:
+                port = extract_target_port(raw_spec)
+                if port and str(port) not in args.ports.split(","):
+                    if args.ports == "top-200":
+                        # If port is not in top-200, ensure it gets scanned
+                        args.ports = f"top-200,{port}"
+                    else:
+                        args.ports = f"{args.ports},{port}"
 
         if not resolved_map:
             logger.error("No valid targets identified.")
