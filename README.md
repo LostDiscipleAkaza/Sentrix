@@ -1,3 +1,11 @@
+```text
+  ____             _        _      
+ / ___|  ___ _ __ | |_ _ __(_)_  __
+ \___ \ / _ \ '_ \| __| '__| \ \/ /
+  ___) |  __/ | | | |_| |  | |>  < 
+ |____/ \___|_| |_|\__|_|  |_/_/\_\
+```
+
 # Sentrix 2.1
 
 An advanced, resilient command-line network reconnaissance and threat assessment pipeline. Sentrix supports dual input modes (command line arguments and interactive prompt), resolves multi-target inputs (domains, IPv4, IPv6, CIDR blocks, IP ranges, target list files), conducts firewall-resilient host liveness checks, performs DNS enumeration (with zone transfer tests and passive/dictionary subdomain discovery), queries Shodan InternetDB for historical port & vuln intel, executes service/port scanning with protocol-aware concurrent banner grabbing, performs deep web technology & OWASP security header auditing, cross-references discovered services against known CVEs with local 7-day SQLite caching, enriches findings with EPSS exploitation probabilities and CISA Known Exploited Vulnerabilities (KEV) intelligence, and generates structured reports across JSON, HTML, and Markdown formats.
