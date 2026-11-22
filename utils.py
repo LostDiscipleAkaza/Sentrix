@@ -116,11 +116,12 @@ def safe_get(dictionary: Dict[str, Any], key: str, default: Any = "") -> Any:
 
 def print_banner(version: str = "2.1.0") -> None:
     """Prints a styled terminal banner enclosed in an ASCII tool frame."""
-    logo = r"""  ____             _        _      
- / ___|  ___ _ __ | |_ _ __(_)_  __
- \___ \ / _ \ '_ \| __| '__| \ \/ /
-  ___) |  __/ | | | |_| |  | |>  < 
- |____/ \___|_| |_|\__|_|  |_/_/\_\ """
+    logo = """███████╗███████╗███╗   ██╗████████╗██████╗ ██╗██╗  ██╗
+██╔════╝██╔════╝████╗  ██║╚══██╔══╝██╔══██╗██║╚██╗██╔╝
+███████╗█████╗  ██╔██╗ ██║   ██║   ██████╔╝██║ ╚███╔╝ 
+╚════██║██╔══╝  ██║╚██╗██║   ██║   ██╔══██╗██║ ██╔██╗ 
+███████║███████╗██║ ╚████║   ██║   ██║  ██║██║██╔╝ ██╗
+╚══════╝╚══════╝╚═╝  ╚═══╝   ╚═╝   ╚═╝  ╚═╝╚═╝╚═╝  ╚═╝"""
 
     width = 76
     top_line = f"{ColorCodes.CYAN}╔{'═' * (width - 2)}╗{ColorCodes.RESET}"
@@ -129,8 +130,10 @@ def print_banner(version: str = "2.1.0") -> None:
 
     print(top_line)
     for line in logo.split("\n"):
-        pad = width - 4 - len(line)
-        print(f"{ColorCodes.CYAN}║{ColorCodes.RESET} {ColorCodes.BOLD}{line}{ColorCodes.RESET}{' ' * max(0, pad)} {ColorCodes.CYAN}║{ColorCodes.RESET}")
+        pad_total = width - 4 - len(line)
+        pad_left = pad_total // 2
+        pad_right = pad_total - pad_left
+        print(f"{ColorCodes.CYAN}║{ColorCodes.RESET} {' ' * pad_left}{ColorCodes.BOLD}{ColorCodes.CYAN}{line}{ColorCodes.RESET}{' ' * pad_right} {ColorCodes.CYAN}║{ColorCodes.RESET}")
 
     print(sep_line)
     subtitle = f"Sentrix: Advanced Network Reconnaissance & Threat Assessment Pipeline v{version}"
