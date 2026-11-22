@@ -14,21 +14,26 @@ from typing import Any, Dict, Generator, List, Optional, Set, Tuple
 
 import requests
 
-logger = logging.getLogger("reconnoiter")
+logger = logging.getLogger("sentrix")
 
 NVD_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 CIRCL_URL = "https://vulnerability.circl.lu/api/search"
 CISA_KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 EPSS_URL = "https://api.first.org/data/v1/epss"
+SHODAN_URL = "https://internetdb.shodan.io"
 
-CACHE_DB_PATH = os.environ.get("RECON_CACHE_DB", "cve_cache.db")
+CACHE_DB_PATH = os.environ.get("SENTRIX_CACHE_DB", os.environ.get("RECON_CACHE_DB", "cve_cache.db"))
 DEFAULT_TTL_SECONDS = 7 * 24 * 60 * 60  # 7-day TTL
 
 VENDOR_ALIASES = {
     ("igor_sysoev", "nginx"): "f5",
 }
 
-API_KEY = os.environ.get("NVD_API_KEY")
+NVD_API_KEY = os.environ.get("NVD_API_KEY")
+API_KEY = NVD_API_KEY  # Backward compatibility
+CIRCL_API_KEY = os.environ.get("CIRCL_API_KEY")
+SHODAN_API_KEY = os.environ.get("SHODAN_API_KEY")
+
 _MIN_INTERVAL = 0.7 if API_KEY else 6.5
 _throttle_lock = threading.Lock()
 _last_request_time = 0.0
@@ -37,14 +42,41 @@ _cisa_kev_memory_cache: Optional[Set[str]] = None
 _db_lock = threading.Lock()
 
 
+def set_nvd_key(key: str) -> None:
+    """Configures NVD API key and adjusts throttling rate limit."""
+    global NVD_API_KEY, API_KEY, _MIN_INTERVAL
+    NVD_API_KEY = key
+    API_KEY = key
+    _MIN_INTERVAL = 0.7 if key else 6.5
+    if key:
+        os.environ["NVD_API_KEY"] = key
+
+
+def set_circl_key(key: str) -> None:
+    """Configures CIRCL Vulnerability Lookup API key."""
+    global CIRCL_API_KEY
+    CIRCL_API_KEY = key
+    if key:
+        os.environ["CIRCL_API_KEY"] = key
+
+
+def set_shodan_key(key: str) -> None:
+    """Configures Shodan API key."""
+    global SHODAN_API_KEY
+    SHODAN_API_KEY = key
+    if key:
+        os.environ["SHODAN_API_KEY"] = key
+
+
 # ---------------------------------------------------------------------------
 # SQLite Cache Layer
 # ---------------------------------------------------------------------------
 
 @contextlib.contextmanager
-def _open_db(db_path: str = CACHE_DB_PATH) -> Generator[sqlite3.Connection, None, None]:
+def _open_db(db_path: Optional[str] = None) -> Generator[sqlite3.Connection, None, None]:
     """Context manager that opens, commits, and explicitly closes SQLite connection."""
-    conn = sqlite3.connect(db_path)
+    actual_path = db_path if db_path is not None else CACHE_DB_PATH
+    conn = sqlite3.connect(actual_path)
     try:
         with conn:
             yield conn
@@ -52,8 +84,10 @@ def _open_db(db_path: str = CACHE_DB_PATH) -> Generator[sqlite3.Connection, None
         conn.close()
 
 
-def init_cache_db(db_path: str = CACHE_DB_PATH) -> None:
-    """Initializes SQLite database tables for CPE lookups, CISA KEV, and EPSS scores."""
+def init_cache_db(db_path: Optional[str] = None) -> None:
+    """Initializes SQLite database tables for CPE lookups, CISA KEV, EPSS scores, and Shodan InternetDB."""
+    if db_path is None:
+        db_path = CACHE_DB_PATH
     with _db_lock:
         with _open_db(db_path) as conn:
             cursor = conn.cursor()
@@ -88,12 +122,130 @@ def init_cache_db(db_path: str = CACHE_DB_PATH) -> None:
                 )
                 """
             )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS shodan_cache (
+                    ip TEXT PRIMARY KEY,
+                    data_json TEXT,
+                    cached_at REAL
+                )
+                """
+            )
+
+
+def get_cached_shodan(
+    ip: str, ttl_seconds: float = DEFAULT_TTL_SECONDS, db_path: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """Retrieves cached Shodan InternetDB result if present and within TTL."""
+    if db_path is None:
+        db_path = CACHE_DB_PATH
+    init_cache_db(db_path)
+    now = time.time()
+    with _db_lock:
+        with _open_db(db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT data_json, cached_at FROM shodan_cache WHERE ip = ?", (ip,))
+            row = cursor.fetchone()
+            if row:
+                data_json, cached_at = row
+                if now - cached_at <= ttl_seconds:
+                    try:
+                        return json.loads(data_json)
+                    except json.JSONDecodeError:
+                        return None
+    return None
+
+
+def set_cached_shodan(
+    ip: str, data: Dict[str, Any], db_path: Optional[str] = None
+) -> None:
+    """Stores Shodan InternetDB result in SQLite cache."""
+    if db_path is None:
+        db_path = CACHE_DB_PATH
+    init_cache_db(db_path)
+    now = time.time()
+    with _db_lock:
+        with _open_db(db_path) as conn:
+            conn.cursor().execute(
+                "INSERT OR REPLACE INTO shodan_cache (ip, data_json, cached_at) VALUES (?, ?, ?)",
+                (ip, json.dumps(data), now),
+            )
+
+
+def query_shodan_internetdb(
+    ip: str, bypass_cache: bool = False, timeout: float = 12.0, db_path: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Queries Shodan InternetDB (free API at https://internetdb.shodan.io/{ip})
+    for ports, hostnames, CPEs, tags, and known CVEs.
+    Caches result locally in SQLite with a 7-day TTL.
+    """
+    if db_path is None:
+        db_path = CACHE_DB_PATH
+    if not ip:
+        return {"status": "error", "ip": ip, "reason": "empty_ip", "ports": [], "tags": [], "vulns": [], "hostnames": [], "cpes": []}
+
+    if not bypass_cache:
+        cached = get_cached_shodan(ip, db_path=db_path)
+        if cached:
+            cached["cached"] = True
+            return cached
+
+    url = f"{SHODAN_URL}/{ip}"
+    headers = {"Accept": "application/json"}
+    if SHODAN_API_KEY:
+        headers["Authorization"] = f"Bearer {SHODAN_API_KEY}"
+
+    try:
+        r = requests.get(url, headers=headers, timeout=timeout)
+        if r.status_code == 200:
+            data = r.json()
+            data["status"] = "found"
+            set_cached_shodan(ip, data, db_path=db_path)
+            return data
+        elif r.status_code == 404:
+            not_found_res = {
+                "status": "not_found",
+                "ip": ip,
+                "ports": [],
+                "tags": [],
+                "vulns": [],
+                "hostnames": [],
+                "cpes": [],
+            }
+            set_cached_shodan(ip, not_found_res, db_path=db_path)
+            return not_found_res
+        else:
+            return {
+                "status": "error",
+                "ip": ip,
+                "reason": f"http_{r.status_code}",
+                "ports": [],
+                "tags": [],
+                "vulns": [],
+                "hostnames": [],
+                "cpes": [],
+            }
+    except Exception as e:
+        logger.debug(f"Shodan InternetDB query failed for {ip}: {e}")
+        return {
+            "status": "error",
+            "ip": ip,
+            "reason": str(e),
+            "ports": [],
+            "tags": [],
+            "vulns": [],
+            "hostnames": [],
+            "cpes": [],
+        }
 
 
 def get_cached_cpe(
-    cpe: str, ttl_seconds: float = DEFAULT_TTL_SECONDS, db_path: str = CACHE_DB_PATH
+    cpe: str, ttl_seconds: float = DEFAULT_TTL_SECONDS, db_path: Optional[str] = None
 ) -> Optional[Dict[str, Any]]:
     """Retrieves a cached CVE lookup result if present and within TTL."""
+    if db_path is None:
+        db_path = CACHE_DB_PATH
     init_cache_db(db_path)
     now = time.time()
     with _db_lock:
@@ -128,13 +280,15 @@ def get_cached_cpe(
 
 
 def set_cached_cpe(
-    cpe: str, result: Dict[str, Any], db_path: str = CACHE_DB_PATH
+    cpe: str, result: Dict[str, Any], db_path: Optional[str] = None
 ) -> None:
     """Stores a CVE lookup result in the local SQLite cache."""
     # Don't cache error states for a full 7 days; only clean matches / unmatches
     if result.get("status") == "error":
         return
 
+    if db_path is None:
+        db_path = CACHE_DB_PATH
     init_cache_db(db_path)
     now = time.time()
     cves_json = json.dumps(result.get("cves", []))
@@ -443,7 +597,10 @@ def _parse_cve_entry(item: Dict[str, Any]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def lookup_by_cpe(cpe23: Optional[str]) -> Dict[str, Any]:
-    """Looks up CVEs for an exact CPE 2.3 string via NVD."""
+    """
+    Looks up CVEs for an exact CPE 2.3 string via NVD.
+    Includes 35s timeout and up to 2 retries with exponential backoff on 429 / 5xx / timeouts.
+    """
     if not cpe23:
         return {"status": "unmatched", "cves": [], "reason": "no_cpe_available"}
 
@@ -459,22 +616,59 @@ def lookup_by_cpe(cpe23: Optional[str]) -> Dict[str, Any]:
     # Use virtualMatchString only when version is wildcarded.
     param_name = "virtualMatchString" if is_version_wildcard else "cpeName"
 
-    try:
-        _throttle()
-        r = requests.get(
-            NVD_URL,
-            params={param_name: cpe23, "resultsPerPage": 200},
-            headers=_headers(),
-            timeout=20,
-        )
-        if r.status_code == 429:
-            return {"status": "error", "cves": [], "reason": "rate_limited"}
-        r.raise_for_status()
-        data = r.json()
-    except requests.exceptions.RequestException as e:
-        return {"status": "error", "cves": [], "reason": f"request_failed: {e}"}
-    except ValueError:
-        return {"status": "error", "cves": [], "reason": "invalid_json_response"}
+    max_retries = 2
+    data = None
+    last_error = "unknown_error"
+
+    for attempt in range(max_retries + 1):
+        try:
+            _throttle()
+            r = requests.get(
+                NVD_URL,
+                params={param_name: cpe23, "resultsPerPage": 200},
+                headers=_headers(),
+                timeout=35,
+            )
+            if r.status_code == 429:
+                if attempt < max_retries:
+                    backoff = (attempt + 1) * 3.5
+                    logger.warning(
+                        f"NVD rate limit hit (429) for {cpe23}. Retrying in {backoff:.1f}s (attempt {attempt + 1}/{max_retries})..."
+                    )
+                    time.sleep(backoff)
+                    continue
+                return {"status": "error", "cves": [], "reason": "rate_limited"}
+
+            if 500 <= r.status_code < 600:
+                if attempt < max_retries:
+                    backoff = (attempt + 1) * 3.0
+                    logger.warning(
+                        f"NVD server error ({r.status_code}) for {cpe23}. Retrying in {backoff:.1f}s (attempt {attempt + 1}/{max_retries})..."
+                    )
+                    time.sleep(backoff)
+                    continue
+                return {"status": "error", "cves": [], "reason": f"nvd_server_error_{r.status_code}"}
+
+            r.raise_for_status()
+            data = r.json()
+            break
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            last_error = str(e)
+            if attempt < max_retries:
+                backoff = (attempt + 1) * 3.0
+                logger.warning(
+                    f"NVD connection/timeout error ({e.__class__.__name__}) for {cpe23}. Retrying in {backoff:.1f}s (attempt {attempt + 1}/{max_retries})..."
+                )
+                time.sleep(backoff)
+                continue
+            return {"status": "error", "cves": [], "reason": f"request_failed: {e}"}
+        except requests.exceptions.RequestException as e:
+            return {"status": "error", "cves": [], "reason": f"request_failed: {e}"}
+        except ValueError:
+            return {"status": "error", "cves": [], "reason": "invalid_json_response"}
+
+    if data is None:
+        return {"status": "error", "cves": [], "reason": f"request_failed: {last_error}"}
 
     seen = {}
     product_clean = product.lower().replace("_", "")
@@ -542,20 +736,47 @@ def _parse_circl_entry(item: Any) -> Optional[Dict[str, Any]]:
 
 
 def lookup_by_vendor_product(vendor: Optional[str], product: Optional[str]) -> Dict[str, Any]:
-    """Fallback CVE lookup against CIRCL's Vulnerability-Lookup service."""
+    """
+    Fallback CVE lookup against CIRCL's Vulnerability-Lookup service.
+    Supports CIRCL_API_KEY and retries with backoff on temporary server errors.
+    """
     if not vendor or not product:
         return {"status": "unmatched", "cves": [], "reason": "no_vendor_product"}
 
-    try:
-        r = requests.get(f"{CIRCL_URL}/{vendor}/{product}", timeout=20)
-        if r.status_code == 404:
-            return {"status": "unmatched", "cves": [], "reason": "no_matching_cves"}
-        r.raise_for_status()
-        data = r.json()
-    except requests.exceptions.RequestException as e:
-        return {"status": "error", "cves": [], "reason": f"request_failed: {e}"}
-    except ValueError:
-        return {"status": "error", "cves": [], "reason": "invalid_json_response"}
+    headers = {"Accept": "application/json"}
+    if CIRCL_API_KEY:
+        headers["Authorization"] = (
+            CIRCL_API_KEY if CIRCL_API_KEY.startswith("Bearer ") else f"Bearer {CIRCL_API_KEY}"
+        )
+
+    max_retries = 1
+    data = None
+    last_error = "unknown_error"
+
+    for attempt in range(max_retries + 1):
+        try:
+            r = requests.get(f"{CIRCL_URL}/{vendor}/{product}", headers=headers, timeout=25)
+            if r.status_code == 404:
+                return {"status": "unmatched", "cves": [], "reason": "no_matching_cves"}
+            if 500 <= r.status_code < 600 and attempt < max_retries:
+                time.sleep(2.0)
+                continue
+            r.raise_for_status()
+            data = r.json()
+            break
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            last_error = str(e)
+            if attempt < max_retries:
+                time.sleep(2.0)
+                continue
+            return {"status": "error", "cves": [], "reason": f"request_failed: {e}"}
+        except requests.exceptions.RequestException as e:
+            return {"status": "error", "cves": [], "reason": f"request_failed: {e}"}
+        except ValueError:
+            return {"status": "error", "cves": [], "reason": "invalid_json_response"}
+
+    if data is None:
+        return {"status": "error", "cves": [], "reason": f"request_failed: {last_error}"}
 
     items = []
     if isinstance(data, list):
@@ -591,18 +812,23 @@ def lookup_by_vendor_product(vendor: Optional[str], product: Optional[str]) -> D
 # Main CVE Lookup Entry Point with 7-Day SQLite Cache & Enrichment
 # ---------------------------------------------------------------------------
 
-def lookup_cves(cpe22_raw: Any, bypass_cache: bool = False) -> Dict[str, Any]:
+def lookup_cves(cpe22_raw: Any, bypass_cache: bool = False, db_path: Optional[str] = None) -> Dict[str, Any]:
     """
     Combined entry point with 7-day SQLite caching, NVD lookup, CIRCL fallback,
     and enrichment with EPSS probabilities and CISA Known Exploited Vulnerabilities.
+    If --no-cache is used and a live lookup fails, falls back to SQLite cache
+    labeled as (stale, from cache) rather than returning an unassessed failure.
     """
+    if db_path is None:
+        db_path = CACHE_DB_PATH
+
     cpe_normalized = cpe22_raw[0] if isinstance(cpe22_raw, list) and cpe22_raw else cpe22_raw
     if not cpe_normalized or not isinstance(cpe_normalized, str):
         return {"status": "unmatched", "cves": [], "reason": "no_cpe_available"}
 
     # 1. Check SQLite Cache
     if not bypass_cache:
-        cached_result = get_cached_cpe(cpe_normalized)
+        cached_result = get_cached_cpe(cpe_normalized, db_path=db_path)
         if cached_result:
             # Self-healing check: purge corrupted cache entries containing bogus Ping of Death
             cves = cached_result.get("cves", [])
@@ -611,7 +837,7 @@ def lookup_cves(cpe22_raw: Any, bypass_cache: bool = False) -> Dict[str, Any]:
             if has_bogus_ping and product not in ("linux_kernel", "tcp_ip", "icmp"):
                 # Evict corrupted cache entry
                 with _db_lock:
-                    with _open_db() as conn:
+                    with _open_db(db_path) as conn:
                         conn.cursor().execute("DELETE FROM cpe_cache WHERE cpe = ?", (cpe_normalized,))
             else:
                 cached_result["cves"] = enrich_cves(cves)
@@ -635,7 +861,7 @@ def lookup_cves(cpe22_raw: Any, bypass_cache: bool = False) -> Dict[str, Any]:
         nvd_results.append(result)
         if result["status"] == "matched":
             result["cves"] = enrich_cves(result["cves"])
-            set_cached_cpe(cpe_normalized, result)
+            set_cached_cpe(cpe_normalized, result, db_path=db_path)
             return result
 
     circl_results = []
@@ -649,7 +875,7 @@ def lookup_cves(cpe22_raw: Any, bypass_cache: bool = False) -> Dict[str, Any]:
                 + ("_with_vendor_alias" if tried_alias else "")
             )
             result["cves"] = enrich_cves(result["cves"])
-            set_cached_cpe(cpe_normalized, result)
+            set_cached_cpe(cpe_normalized, result, db_path=db_path)
             return result
 
     all_results = nvd_results + circl_results
@@ -659,8 +885,22 @@ def lookup_cves(cpe22_raw: Any, bypass_cache: bool = False) -> Dict[str, Any]:
     )
     status = "error" if any(r["status"] == "error" for r in all_results) else "unmatched"
 
+    # If live call failed, attempt fallback to stale cache
+    if status == "error":
+        stale_cached = get_cached_cpe(cpe_normalized, ttl_seconds=float("inf"), db_path=db_path)
+        if stale_cached and stale_cached.get("status") in ("matched", "unmatched"):
+            logger.warning(
+                f"Live CVE lookup failed for {cpe_normalized} ({combined_reason}); "
+                "falling back to local cache (stale, from cache)."
+            )
+            stale_cached["source"] = f"{stale_cached.get('source', 'nvd')} (stale, from cache)"
+            stale_cached["stale_cache"] = True
+            stale_cached["reason"] = f"live_query_failed ({combined_reason}); fell back to stale cache"
+            stale_cached["cves"] = enrich_cves(stale_cached.get("cves", []))
+            return stale_cached
+
     final_result = {"status": status, "cves": [], "reason": combined_reason}
     if status == "unmatched":
-        set_cached_cpe(cpe_normalized, final_result)
+        set_cached_cpe(cpe_normalized, final_result, db_path=db_path)
 
     return final_result

@@ -1,9 +1,10 @@
 """
-Reconnoiter - Advanced Network Reconnaissance & Vulnerability Assessment Pipeline
+Sentrix - Advanced Network Reconnaissance & Threat Assessment Pipeline
 """
 
 import argparse
 import os
+import re
 import sys
 import time
 from typing import Any, Dict, List, Optional
@@ -31,19 +32,39 @@ def check_cves(finding: Dict[str, Any], bypass_cache: bool = False) -> Dict[str,
     """
     Resolves a scanner finding's CPE (if any) and looks up CVEs.
     Enriches with EPSS probabilities and CISA Known Exploited Vulnerability status.
+    Assigns a distinct finding['cve_status']: 'matched', 'clean', 'no_cpe', or 'failed'.
     """
     cpe = finding.get("cpes")
     cpe_str = (cpe[0] if isinstance(cpe, list) and cpe else cpe) if cpe else None
 
-    if cpe_str:
-        result = lookup_cves(cpe_str, bypass_cache=bypass_cache)
-    else:
-        result = {"status": "unmatched", "cves": [], "reason": "no_cpe_from_nmap"}
+    if not cpe_str:
+        finding["cve_status"] = "no_cpe"
+        finding["cves"] = []
+        finding["cve_reason"] = "no_cpe_from_nmap"
+        finding["cve_source"] = None
+        return finding
 
-    finding["cve_status"] = result.get("status")
-    finding["cves"] = result.get("cves", [])
+    result = lookup_cves(cpe_str, bypass_cache=bypass_cache)
+    raw_status = result.get("status")
+    cves = result.get("cves", [])
+
+    if raw_status == "matched" and cves:
+        finding["cve_status"] = "matched"
+    elif raw_status == "error":
+        finding["cve_status"] = "failed"
+    elif raw_status == "unmatched":
+        reason = result.get("reason", "")
+        if reason in ("no_cpe_available", "no_vendor_product"):
+            finding["cve_status"] = "no_cpe"
+        else:
+            finding["cve_status"] = "clean"
+    else:
+        finding["cve_status"] = "clean" if not cves else "matched"
+
+    finding["cves"] = cves
     finding["cve_reason"] = result.get("reason")
     finding["cve_source"] = result.get("source")
+    finding["stale_cache"] = result.get("stale_cache", False)
     finding["version_unspecified"] = result.get("version_unspecified", False)
     return finding
 
@@ -102,15 +123,20 @@ def print_finding(finding: Dict[str, Any]) -> None:
             shown_items.append(f"{cid} ({score_str}){badge_str}")
 
         source = finding.get("cve_source", "nvd")
-        print(f"    {ColorCodes.RED}CVEs [{source}]:{ColorCodes.RESET} {len(cves)} found -> {', '.join(shown_items)}")
+        stale_badge = f" {ColorCodes.YELLOW}[STALE CACHE]{ColorCodes.RESET}" if finding.get("stale_cache") else ""
+        print(f"    {ColorCodes.RED}CVEs [{source}]{stale_badge}:{ColorCodes.RESET} {len(cves)} found -> {', '.join(shown_items)}")
         if finding.get("version_unspecified"):
             print(f"        {ColorCodes.YELLOW}[i] Note: Exact version was not fingerprinted; CVEs cover the general software family.{ColorCodes.RESET}")
         if len(cves) > len(top):
             print(f"        {ColorCodes.DIM}...and {len(cves) - len(top)} more documented in report files{ColorCodes.RESET}")
-    elif status == "unmatched":
-        print(f"    {ColorCodes.DIM}CVEs    : No known match ({finding.get('cve_reason', 'clean')}){ColorCodes.RESET}")
+    elif status == "clean":
+        print(f"    {ColorCodes.GREEN}CVEs    : Confirmed clean (0 known CVEs across NVD/CIRCL){ColorCodes.RESET}")
+    elif status == "no_cpe":
+        print(f"    {ColorCodes.DIM}CVEs    : No CPE match (insufficient version fingerprinting){ColorCodes.RESET}")
+    elif status == "failed":
+        print(f"    {ColorCodes.BOLD}{ColorCodes.RED}CVEs    : Lookup failed — service unassessed ({finding.get('cve_reason', 'error')}){ColorCodes.RESET}")
     else:
-        print(f"    {ColorCodes.YELLOW}CVEs    : Lookup notice ({finding.get('cve_reason', 'unknown')}){ColorCodes.RESET}")
+        print(f"    {ColorCodes.DIM}CVEs    : No known match ({finding.get('cve_reason', 'clean')}){ColorCodes.RESET}")
 
     print("  " + "─" * 68)
 
@@ -118,8 +144,8 @@ def print_finding(finding: Dict[str, Any]) -> None:
 def build_arg_parser() -> argparse.ArgumentParser:
     """Builds and returns the command line argument parser."""
     parser = argparse.ArgumentParser(
-        prog="reconnoiter",
-        description="Reconnoiter: Advanced Network Reconnaissance & Vulnerability Assessment Pipeline",
+        prog="sentrix",
+        description="Sentrix: Advanced Network Reconnaissance & Threat Assessment Pipeline",
     )
     parser.add_argument(
         "targets",
@@ -144,9 +170,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Skip host liveness check (assume hosts are up)",
     )
     parser.add_argument(
+        "--nvd-key",
+        dest="nvd_key",
+        help="NVD API key (raises rate limit from 5 to 50 requests/30s)",
+    )
+    parser.add_argument(
         "--api-key",
         dest="api_key",
-        help="NVD API key (raises rate limit from 5 to 50 requests/30s)",
+        help="NVD API key alias (compatible with --nvd-key)",
+    )
+    parser.add_argument(
+        "--circl-key",
+        dest="circl_key",
+        help="CIRCL Vulnerability-Lookup API key (vulnerability.circl.lu)",
+    )
+    parser.add_argument(
+        "--shodan-key",
+        dest="shodan_key",
+        help="Shodan API key for Shodan queries",
     )
     parser.add_argument(
         "-o",
@@ -199,17 +240,35 @@ def main() -> None:
     parser = build_arg_parser()
     args = parser.parse_args()
 
+    # Dual input mode: interactive prompt if no targets were passed on CLI
     if not args.targets and not args.input_file:
-        parser.print_help()
-        sys.exit(1)
+        print_banner()
+        print(f"  {ColorCodes.CYAN}Sentrix Interactive Mode{ColorCodes.RESET} - No targets specified on command line.")
+        try:
+            prompt_str = f"  {ColorCodes.BOLD}sentrix > Enter target(s) (e.g. domain, IP, CIDR, URL): {ColorCodes.RESET}"
+            user_input = input(prompt_str).strip()
+        except (KeyboardInterrupt, EOFError):
+            print(f"\n{ColorCodes.YELLOW}[!] Interactive session cancelled.{ColorCodes.RESET}")
+            sys.exit(0)
 
-    logger = setup_logging(verbose=args.verbose)
-    print_banner()
+        if not user_input:
+            print(f"  {ColorCodes.YELLOW}[!] No target provided. Exiting.{ColorCodes.RESET}\n")
+            sys.exit(0)
 
-    if args.api_key:
-        os.environ["NVD_API_KEY"] = args.api_key
-        cve_lookup.API_KEY = args.api_key
-        cve_lookup._MIN_INTERVAL = 0.7
+        raw_tokens = [t.strip() for t in re.split(r"[\s,;]+", user_input) if t.strip()]
+        args.targets = raw_tokens
+        logger = setup_logging(verbose=args.verbose)
+    else:
+        logger = setup_logging(verbose=args.verbose)
+        print_banner()
+
+    nvd_k = args.nvd_key or args.api_key
+    if nvd_k:
+        cve_lookup.set_nvd_key(nvd_k)
+    if args.circl_key:
+        cve_lookup.set_circl_key(args.circl_key)
+    if args.shodan_key:
+        cve_lookup.set_shodan_key(args.shodan_key)
 
     scan_start_timestamp = current_timestamp()
     start_monotonic = time.time()
@@ -242,12 +301,13 @@ def main() -> None:
 
         for target, resolved_ips in resolved_map.items():
             # Target configuration ASCII frame
+            threat_intel_label = "NIST NVD 2.0 (SQLite 7d TTL) + CIRCL + Shodan InternetDB + CISA KEV + EPSS"
             frame_lines = [
                 f"Target Specifier : {ColorCodes.BOLD}{target}{ColorCodes.RESET}",
                 f"Resolved IPs     : {', '.join(resolved_ips) if resolved_ips else 'Unresolved'}",
                 f"Port Scope       : {args.ports} (Worker Threads: {args.threads})",
                 f"Liveness Probe   : {'Bypassed (--no-ping)' if args.no_ping else 'Hybrid ICMP Echo + TCP Connect Ping'}",
-                f"Threat Intel     : NIST NVD 2.0 (SQLite 7d TTL) + CISA KEV + FIRST EPSS",
+                f"Threat Intel     : {threat_intel_label}",
                 f"Output Format    : {args.format.upper()} (Output: {args.output_file or 'reports/'})",
             ]
             print(draw_frame("TARGET ASSESSMENT CONFIGURATION", frame_lines, color=ColorCodes.CYAN))
@@ -306,6 +366,7 @@ def main() -> None:
             all_os_info: List[Dict[str, Any]] = []
             active_scanned_ips: List[str] = []
             any_alive = False
+            target_shodan_intel: Dict[str, Any] = {}
 
             # 3. Scan each resolved IP
             for ip in resolved_ips:
@@ -313,6 +374,26 @@ def main() -> None:
                 ptr = reverse_dns(ip)
                 if ptr:
                     print(f"  {ColorCodes.DIM}[PTR]{ColorCodes.RESET} Reverse DNS for {ip}: {ptr}")
+
+                # Shodan InternetDB threat intelligence
+                shodan_data = cve_lookup.query_shodan_internetdb(ip, bypass_cache=args.no_cache)
+                if shodan_data and shodan_data.get("status") == "found":
+                    target_shodan_intel[ip] = shodan_data
+                    s_tags = shodan_data.get("tags", [])
+                    s_vulns = shodan_data.get("vulns", [])
+                    s_ports = shodan_data.get("ports", [])
+                    s_hosts = shodan_data.get("hostnames", [])
+                    info_parts = []
+                    if s_tags:
+                        info_parts.append(f"Tags: [{', '.join(s_tags)}]")
+                    if s_hosts:
+                        info_parts.append(f"Hostnames: {', '.join(s_hosts[:3])}")
+                    if s_vulns:
+                        info_parts.append(f"{ColorCodes.RED}Known Vulns: {len(s_vulns)} ({', '.join(s_vulns[:4])}{'...' if len(s_vulns) > 4 else ''}){ColorCodes.RESET}")
+                    if s_ports:
+                        info_parts.append(f"Observed Ports: {s_ports[:8]}")
+                    if info_parts:
+                        print(f"  {ColorCodes.CYAN}[Shodan InternetDB]{ColorCodes.RESET} {' | '.join(info_parts)}")
 
                 # Host liveness check (ICMP + TCP Connect Ping)
                 alive = True
@@ -389,7 +470,7 @@ def main() -> None:
             target_alive = any_alive or args.no_ping
 
             metadata = {
-                "scanner_version": "Reconnoiter 2.0.0",
+                "scanner_version": "Sentrix 2.1.0",
                 "command_line_args": " ".join(sys.argv[1:]),
                 "scan_start_time": scan_start_timestamp,
                 "scan_end_time": scan_end_timestamp,
@@ -399,6 +480,7 @@ def main() -> None:
                 "ip": primary_ip,
                 "all_ips": resolved_ips,
                 "active_ips": active_scanned_ips,
+                "shodan_intel": target_shodan_intel,
             }
 
             written_files = write_report(
@@ -417,9 +499,33 @@ def main() -> None:
             )
 
             # Count statistics for summary card
+            total_services = len(all_findings)
+            failed_services = [f for f in all_findings if f.get("cve_status") == "failed"]
+            no_cpe_services = [f for f in all_findings if f.get("cve_status") == "no_cpe"]
             crit_count = sum(1 for f in all_findings for c in f.get("cves", []) if c.get("severity") == "CRITICAL" or (c.get("cvss") or 0) >= 9.0)
             kev_count = sum(1 for f in all_findings for c in f.get("cves", []) if c.get("cisa_kev"))
             total_cves = sum(len(f.get("cves", [])) for f in all_findings)
+
+            # Worst-case summary outcome calculation:
+            # Must distinguish:
+            # - 0 CVEs (no CPE match)
+            # - 0 CVEs (lookup failed — N/N services unassessed)
+            # - 0 CVEs (confirmed clean)
+            # Never collapse "failed" into "0"
+            if total_cves > 0:
+                if failed_services:
+                    cve_summary_line = f"{total_cves} (Critical: {crit_count}) — ⚠️ {len(failed_services)}/{total_services} service lookups failed"
+                else:
+                    cve_summary_line = f"{total_cves} (Critical CVSS 9.0+: {crit_count})"
+            elif total_services == 0:
+                cve_summary_line = "0 (No open services)"
+            else:
+                if failed_services:
+                    cve_summary_line = f"0 CVEs (lookup failed — {len(failed_services)}/{total_services} services unassessed)"
+                elif no_cpe_services:
+                    cve_summary_line = "0 CVEs (no CPE match)"
+                else:
+                    cve_summary_line = "0 CVEs (confirmed clean)"
 
             # Final Assessment Dashboard Frame
             liveness_str = f"{ColorCodes.GREEN}ALIVE{ColorCodes.RESET}" if target_alive else f"{ColorCodes.YELLOW}OFFLINE / UNRESPONSIVE{ColorCodes.RESET}"
@@ -428,8 +534,8 @@ def main() -> None:
                 f"Target Assessment  : {ColorCodes.BOLD}{target}{ColorCodes.RESET} ({ip_display})",
                 f"Host Liveness      : {liveness_str}",
                 f"Scan Duration      : {duration}s",
-                f"Open Services      : {len(all_findings)} discovered across scanned IPs",
-                f"Total CVEs Found   : {total_cves} (Critical CVSS 9.0+: {crit_count})",
+                f"Open Services      : {total_services} discovered across scanned IPs",
+                f"Total CVEs Found   : {cve_summary_line}",
                 f"CISA KEV Status    : {f'{ColorCodes.BOLD}{ColorCodes.RED}⚠️ {kev_count} ACTIVELY EXPLOITED IN WILD{ColorCodes.RESET}' if kev_count else f'{ColorCodes.GREEN}No known active exploits{ColorCodes.RESET}'}",
                 f"Zone Transfer Leak : {f'{ColorCodes.BOLD}{ColorCodes.RED}YES (VULNERABLE){ColorCodes.RESET}' if zone_transfer.get('vulnerable') else 'No (Refused)'}",
                 f"Subdomains Found   : {len(subdomains)} active",

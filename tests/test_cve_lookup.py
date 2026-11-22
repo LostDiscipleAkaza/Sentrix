@@ -168,6 +168,87 @@ class TestCVELookup(unittest.TestCase):
         self.assertEqual(len(res["cves"]), 1)
         self.assertEqual(res["cves"][0]["id"], "CVE-2022-1234")
 
+    @patch("cve_lookup.requests.get")
+    def test_shodan_internetdb_cache_and_query(self, mock_get):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "ip": "1.2.3.4",
+            "ports": [80, 443],
+            "tags": ["cloud"],
+            "vulns": ["CVE-2023-1111"],
+            "hostnames": ["example.org"],
+            "cpes": ["cpe:/a:apache:http_server:2.4.49"],
+        }
+        mock_get.return_value = mock_resp
+
+        # First call fetches live and caches
+        res1 = cve_lookup.query_shodan_internetdb("1.2.3.4", db_path=self.db_path)
+        self.assertEqual(res1["status"], "found")
+        self.assertEqual(res1["ports"], [80, 443])
+        self.assertEqual(mock_get.call_count, 1)
+
+        # Second call hits SQLite cache without network call
+        res2 = cve_lookup.query_shodan_internetdb("1.2.3.4", db_path=self.db_path)
+        self.assertEqual(res2["status"], "found")
+        self.assertTrue(res2.get("cached"))
+        self.assertEqual(mock_get.call_count, 1)
+
+    @patch("cve_lookup.time.sleep")
+    @patch("cve_lookup.requests.get")
+    def test_nvd_retry_on_429(self, mock_get, mock_sleep):
+        resp_429 = MagicMock()
+        resp_429.status_code = 429
+
+        resp_ok = MagicMock()
+        resp_ok.status_code = 200
+        resp_ok.json.return_value = {
+            "vulnerabilities": [
+                {
+                    "cve": {
+                        "id": "CVE-2023-1234",
+                        "descriptions": [{"value": "nginx test vuln"}],
+                        "metrics": {"cvssMetricV31": [{"cvssData": {"baseScore": 7.5, "baseSeverity": "HIGH"}}]},
+                    }
+                }
+            ]
+        }
+        # First attempt 429, second attempt 200 OK
+        mock_get.side_effect = [resp_429, resp_ok]
+
+        res = cve_lookup.lookup_by_cpe("cpe:2.3:a:nginx:nginx:1.18.0:*:*:*:*:*:*:*")
+        self.assertEqual(res["status"], "matched")
+        self.assertEqual(mock_get.call_count, 2)
+        mock_sleep.assert_called()
+
+    @patch("cve_lookup.lookup_by_vendor_product")
+    @patch("cve_lookup.lookup_by_cpe")
+    def test_stale_cache_fallback_on_live_failure(self, mock_cpe, mock_circl):
+        cpe = "cpe:/a:openbsd:openssh:8.9p1"
+        # Seed cache initially with valid entry
+        cve_lookup.set_cached_cpe(
+            cpe,
+            {
+                "status": "matched",
+                "source": "nvd",
+                "cves": [{"id": "CVE-2024-6387", "cvss": 8.1, "severity": "HIGH"}],
+                "reason": "initial_seed",
+            },
+            db_path=self.db_path,
+        )
+
+        # Force live lookups to simulate network outage/error
+        mock_cpe.return_value = {"status": "error", "cves": [], "reason": "request_failed: Connection timed out"}
+        mock_circl.return_value = {"status": "error", "cves": [], "reason": "request_failed: 503 Server Error"}
+
+        with patch("cve_lookup.CACHE_DB_PATH", self.db_path):
+            res = lookup_cves(cpe, bypass_cache=True)
+            # Should have fallen back to stale cache rather than failing
+            self.assertEqual(res["status"], "matched")
+            self.assertTrue(res.get("stale_cache"))
+            self.assertIn("(stale, from cache)", res.get("source", ""))
+            self.assertEqual(res["cves"][0]["id"], "CVE-2024-6387")
+
 
 if __name__ == "__main__":
     unittest.main()

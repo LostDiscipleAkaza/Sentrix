@@ -1,12 +1,14 @@
-# Reconnoiter 2.0
+# Sentrix 2.1
 
-An advanced, resilient command-line network reconnaissance and vulnerability assessment pipeline. It resolves multi-target inputs (domains, IPv4, IPv6, CIDR blocks, IP ranges, target list files), conducts firewall-resilient host liveness checks, performs DNS enumeration (with zone transfer tests and passive/dictionary subdomain discovery), executes service/port scanning with protocol-aware concurrent banner grabbing, cross-references discovered services against known CVEs with local 7-day SQLite caching, enriches findings with EPSS exploitation probabilities and CISA Known Exploited Vulnerabilities (KEV) intelligence, and generates structured reports across JSON, HTML, and Markdown formats.
+An advanced, resilient command-line network reconnaissance and threat assessment pipeline. Sentrix supports dual input modes (command line arguments and interactive prompt), resolves multi-target inputs (domains, IPv4, IPv6, CIDR blocks, IP ranges, target list files), conducts firewall-resilient host liveness checks, performs DNS enumeration (with zone transfer tests and passive/dictionary subdomain discovery), queries Shodan InternetDB for historical port & vuln intel, executes service/port scanning with protocol-aware concurrent banner grabbing, performs deep web technology & OWASP security header auditing, cross-references discovered services against known CVEs with local 7-day SQLite caching, enriches findings with EPSS exploitation probabilities and CISA Known Exploited Vulnerabilities (KEV) intelligence, and generates structured reports across JSON, HTML, and Markdown formats.
 
 ---
 
 ## Capabilities & Architecture
 
-1. **Target Flexibility & Resolution (`resolver.py`)**
+1. **Dual Input Modes & Target Resolution (`resolver.py`, `main.py`)**
+   - **Interactive Prompt**: Run `python main.py` without arguments to launch an interactive session that prompts for target domains, IPs, or CIDR blocks.
+   - **CLI Mode**: Pass targets directly via command-line arguments: `python main.py <target>`.
    - Supports hostnames, IPv4, IPv6, CIDR blocks (`192.168.1.0/24`), IP ranges (`192.168.1.1-10`), and target list files (`-iL targets.txt`).
    - Resolves all associated IPv4 and IPv6 records via `socket.getaddrinfo()`.
 
@@ -20,26 +22,36 @@ An advanced, resilient command-line network reconnaissance and vulnerability ass
    - **DNS Zone Transfer Test (AXFR)**: Tests authoritative nameservers for unauthenticated AXFR leaks.
    - **Subdomain Enumeration**: Combines passive Certificate Transparency log queries (`crt.sh`) with concurrent dictionary resolution.
 
-4. **Service Scanning & Concurrent Banner Grabbing (`scanner.py`, `banner_grabber.py`)**
+4. **Shodan InternetDB Threat Intelligence (`cve_lookup.py`)**
+   - Integrates with the free Shodan InternetDB API (`https://internetdb.shodan.io/{ip}`).
+   - Automatically harvests known open ports, hostnames, cloud tags (e.g. `eol-product`, `cloud`), and verified historical CVEs.
+   - Caches responses locally in SQLite (`cve_cache.db`) with a 7-day TTL.
+
+5. **Service Scanning & Concurrent Banner Grabbing (`scanner.py`, `banner_grabber.py`)**
    - Runs `nmap` service/OS detection with automatic fallback to high-speed native socket scanning if `nmap` is unavailable or unprivileged.
    - **Protocol-Aware Probing**: Sends structured HTTP `HEAD /` requests to elicit accurate server headers.
    - **TLS/SSL Handshake Wrapping**: Automatically wraps SSL/TLS connections on ports like 443, 8443, 993.
    - **Concurrency**: Banner grabbing runs in parallel across all open ports using `concurrent.futures.ThreadPoolExecutor`.
 
-5. **Deep Detection & Fingerprinting (`fingerprint.py`)**
+6. **Deep Detection & Fingerprinting (`fingerprint.py`)**
    - **WAF / CDN Detection**: Identifies reverse proxies and firewalls (Cloudflare, AWS CloudFront, Akamai, Fastly, Imperva, Azure Front Door, Sucuri, F5 BIG-IP) from headers and cookie heuristics.
    - **Web Stack & Framework Fingerprinting**: Inspects headers, session cookies, and DOM footprints to discover CMSs (WordPress, Drupal, Joomla), frontend frameworks (React, Next.js, Vue, Angular), and backend runtimes (PHP, Java, Django, Express, Laravel, ASP.NET).
    - **OWASP Security Headers Audit**: Evaluates critical defensive headers (HSTS, CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy) with automated grading (A to F) and step-by-step remediation snippets.
    - **Deep TLS/SSL Inspection**: Extracts Subject Common Names, Subject Alternative Names (SANs - automatically recycled into subdomain intelligence), Issuer CAs, expiration timelines, and detects self-signed/untrusted certificates.
 
-6. **Vulnerability Intelligence & Caching (`cve_lookup.py`)**
-   - **Local SQLite Cache (`cve_cache.db`)**: Caches CPE lookups with a 7-day TTL to eliminate NIST NVD rate-limit delays (5 req/30s).
+7. **Resilient Vulnerability Intelligence & Caching (`cve_lookup.py`)**
+   - **Multi-Source Threat Intel**: Integrates NIST NVD API 2.0 (`--nvd-key`), CIRCL Vulnerability Lookup (`--circl-key`), and Shodan InternetDB (`--shodan-key`).
+   - **Exponential Backoff & 35s Timeout**: Automatically retries on 429 rate limits or transient network errors up to 2 times before falling back.
+   - **Stale Cache Fallback**: When `--no-cache` is used and a live API call fails, Sentrix falls back to previously cached records with a `(stale, from cache)` label rather than returning an unassessed failure.
    - **CISA KEV Integration**: Flags vulnerabilities actively exploited in the wild by threat actors.
    - **EPSS Integration**: Fetches Exploit Prediction Scoring System probabilities and percentiles from the FIRST API.
-   - **CIRCL Fallback & Vendor Aliasing**: Automatically resolves renamed vendor CPEs and falls back to CIRCL if NVD has no exact dictionary match.
-   - **Native Banner CPE Ingestion**: Automatically translates raw socket banners (Apache, Nginx, OpenSSH, Dropbear, vsftpd, MySQL, etc.) into CPE strings when running without Nmap.
+   - **Granular Summary States**: Summary cards explicitly reflect the worst-case assessment outcome:
+     - `0 CVEs (no CPE match)`
+     - `0 CVEs (lookup failed — N/N services unassessed)`
+     - `0 CVEs (confirmed clean)`
+     - Never collapses "failed" lookups into "clean".
 
-7. **Multi-Format Reporting & Remediation (`report.py`)**
+8. **Multi-Format Reporting & Remediation (`report.py`)**
    - Generates reports in **JSON**, **HTML**, and **Markdown** (`--format json,html,markdown`).
    - **Interactive HTML**: Modern dark cybersecurity interface with KPI cards, severity meter bars, CVE links, threat badges, fingerprinting summary cards, and contextual remediation recommendations.
    - **Scan Metadata**: Records scanner version, CLI flags used, start/end timestamps, duration, and target IP details.
@@ -49,7 +61,7 @@ An advanced, resilient command-line network reconnaissance and vulnerability ass
 ## Requirements
 
 - Python 3.8+
-- Optional: [`nmap`](https://nmap.org/) on `PATH` (Reconnoiter seamlessly falls back to native socket scanning if nmap is omitted or unprivileged)
+- Optional: [`nmap`](https://nmap.org/) on `PATH` (Sentrix seamlessly falls back to native socket scanning if nmap is omitted or unprivileged)
 
 Install dependencies:
 ```bash
@@ -61,6 +73,9 @@ pip install -r requirements.txt
 ## Usage
 
 ```bash
+# Interactive mode (launches prompt)
+python main.py
+
 # Basic single target scan
 python main.py example.com
 
@@ -70,8 +85,8 @@ python main.py 192.168.1.0/24
 # Custom port range with no ping check and multi-format reports
 python main.py example.com -p 1-1000 --no-ping -o report -f html,json,markdown
 
-# Input target list from file with NVD API key and verbose logging
-python main.py -iL targets.txt --api-key $NVD_API_KEY -v
+# Scan with NVD, CIRCL, and Shodan API keys with verbose logging
+python main.py example.com --nvd-key $NVD_API_KEY --circl-key $CIRCL_API_KEY -v
 ```
 
 ### CLI Flags
@@ -82,7 +97,10 @@ python main.py -iL targets.txt --api-key $NVD_API_KEY -v
 | `-iL, --input-list` | Path to target list file (one per line, comments `#` supported) |
 | `-p, --ports` | Ports to scan (`80,443`, `1-1000`, or `top-200`) [default: `top-200`] |
 | `--no-ping` | Skip ICMP/TCP host liveness probe |
-| `--api-key` | NVD API Key (raises rate limit from 5 to 50 req/30s) |
+| `--nvd-key, --api-key` | NVD API Key (raises rate limit from 5 to 50 req/30s) |
+| `--circl-key` | CIRCL Vulnerability Lookup API Key (`vulnerability.circl.lu`) |
+| `--shodan-key` | Shodan API Key (optional for Shodan queries) |
+| `--no-cache` | Bypass local SQLite cache to query fresh intelligence (with stale fallback on error) |
 | `-o, --output` | Custom output report file or prefix path |
 | `-f, --format` | Report formats: `json,html,markdown` (comma-separated, default: `json,html`) |
 | `-v, --verbose` | Enable verbose debug output |

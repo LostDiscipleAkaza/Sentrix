@@ -12,7 +12,7 @@ from banner_grabber import grab_banners_concurrent
 from fingerprint import perform_deep_http_fingerprint
 from utils import safe_get
 
-logger = logging.getLogger("reconnoiter")
+logger = logging.getLogger("sentrix")
 
 try:
     import nmap

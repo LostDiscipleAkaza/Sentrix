@@ -1,5 +1,5 @@
 """
-Shared utilities, structured logging, and ASCII frame rendering for Reconnoiter.
+Shared utilities, structured logging, and ASCII frame rendering for Sentrix.
 """
 
 import datetime
@@ -48,7 +48,7 @@ class ColoredFormatter(logging.Formatter):
 
 def setup_logging(verbose: bool = False) -> logging.Logger:
     """Configures and returns the main application logger."""
-    logger = logging.getLogger("reconnoiter")
+    logger = logging.getLogger("sentrix")
     logger.setLevel(logging.DEBUG if verbose else logging.INFO)
 
     if not logger.handlers:
@@ -78,13 +78,13 @@ def safe_get(dictionary: Dict[str, Any], key: str, default: Any = "") -> Any:
 # CLI ASCII Tool Frames & Box Drawing
 # ---------------------------------------------------------------------------
 
-def print_banner(version: str = "2.0.0") -> None:
+def print_banner(version: str = "2.1.0") -> None:
     """Prints a styled terminal banner enclosed in an ASCII tool frame."""
-    logo = r"""  ____                                     _ _            
- |  _ \ ___  ___ ___  _ __  _ __   ___ (_) |_ ___ _ __ 
- | |_) / _ \/ __/ _ \| '_ \| '_ \ / _ \| | __/ _ \ '__|
- |  _ <  __/ (_| (_) | | | | | | | (_) | | ||  __/ |   
- |_| \_\___|\___\___/|_| |_|_| |_|\___/|_|\__\___|_|   """
+    logo = r"""  ____             _        _      
+ / ___|  ___ _ __ | |_ _ __(_)_  __
+ \___ \ / _ \ '_ \| __| '__| \ \/ /
+  ___) |  __/ | | | |_| |  | |>  < 
+ |____/ \___|_| |_|\__|_|  |_/_/\_\ """
 
     width = 76
     top_line = f"{ColorCodes.CYAN}╔{'═' * (width - 2)}╗{ColorCodes.RESET}"
@@ -97,11 +97,11 @@ def print_banner(version: str = "2.0.0") -> None:
         print(f"{ColorCodes.CYAN}║{ColorCodes.RESET} {ColorCodes.BOLD}{line}{ColorCodes.RESET}{' ' * max(0, pad)} {ColorCodes.CYAN}║{ColorCodes.RESET}")
 
     print(sep_line)
-    subtitle = f"Advanced Network Reconnaissance & Threat Assessment Pipeline v{version}"
+    subtitle = f"Sentrix: Advanced Network Reconnaissance & Threat Assessment Pipeline v{version}"
     pad_sub = width - 4 - len(subtitle)
     print(f"{ColorCodes.CYAN}║{ColorCodes.RESET} {ColorCodes.YELLOW}{subtitle}{ColorCodes.RESET}{' ' * max(0, pad_sub)} {ColorCodes.CYAN}║{ColorCodes.RESET}")
 
-    caps = "Targets: IPv4 | IPv6 | CIDRs | Passive CT DNS | AXFR | NVD | CISA KEV | EPSS"
+    caps = "Targets: IPv4 | IPv6 | CIDRs | Passive CT DNS | AXFR | NVD | CIRCL | Shodan"
     pad_caps = width - 4 - len(caps)
     print(f"{ColorCodes.CYAN}║{ColorCodes.RESET} {ColorCodes.DIM}{caps}{ColorCodes.RESET}{' ' * max(0, pad_caps)} {ColorCodes.CYAN}║{ColorCodes.RESET}")
     print(bottom_line + "\n")

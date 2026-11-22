@@ -58,6 +58,27 @@ def _compute_summary(report_data: Dict[str, Any]) -> Dict[str, Any]:
                 if epss >= 0.10:  # 10%+ probability
                     high_epss_count += 1
 
+    failed_services = [s for s in services if s.get("cve_status") == "failed"]
+    no_cpe_services = [s for s in services if s.get("cve_status") == "no_cpe"]
+    clean_services = [s for s in services if s.get("cve_status") == "clean"]
+    matched_services = [s for s in services if s.get("cve_status") == "matched"]
+
+    # Compute worst-case aggregate summary text
+    if total_cves > 0:
+        if failed_services:
+            cve_summary_text = f"{total_cves} (Critical: {critical_count}) — ⚠️ {len(failed_services)}/{len(services)} service lookups failed"
+        else:
+            cve_summary_text = f"{total_cves} (Critical: {critical_count})"
+    elif len(services) == 0:
+        cve_summary_text = "0 (No open services)"
+    else:
+        if failed_services:
+            cve_summary_text = f"0 CVEs (lookup failed — {len(failed_services)}/{len(services)} services unassessed)"
+        elif no_cpe_services:
+            cve_summary_text = "0 CVEs (no CPE match)"
+        else:
+            cve_summary_text = "0 CVEs (confirmed clean)"
+
     return {
         "total_services": len(services),
         "open_ports": open_ports,
@@ -68,6 +89,11 @@ def _compute_summary(report_data: Dict[str, Any]) -> Dict[str, Any]:
         "low_cves": low_count,
         "cisa_kev_cves": kev_count,
         "high_epss_cves": high_epss_count,
+        "failed_services": len(failed_services),
+        "no_cpe_services": len(no_cpe_services),
+        "clean_services": len(clean_services),
+        "matched_services": len(matched_services),
+        "cve_summary_text": cve_summary_text,
     }
 
 
@@ -184,7 +210,7 @@ def generate_markdown_report(report_data: Dict[str, Any]) -> str:
     remediations = report_data.get("remediations", [])
 
     lines = [
-        f"# Reconnoiter Security Assessment Report: {report_data.get('target')}",
+        f"# Sentrix Security Assessment Report: {report_data.get('target')}",
         "",
         "## Executive Summary",
         "",
@@ -193,14 +219,14 @@ def generate_markdown_report(report_data: Dict[str, Any]) -> str:
         f"- **Host Liveness**: `{'ALIVE' if report_data.get('alive') else 'UNRESPONSIVE'}`",
         f"- **Scan Duration**: `{meta.get('scan_duration_seconds', 'N/A')} seconds`",
         f"- **Timestamp**: `{report_data.get('scan_time', meta.get('scan_start_time', 'N/A'))}`",
-        f"- **Scanner Version**: `{meta.get('scanner_version', 'Reconnoiter')}`",
+        f"- **Scanner Version**: `{meta.get('scanner_version', 'Sentrix 2.1.0')}`",
         "",
         "### Key Findings Overview",
         "",
         "| Metric | Count |",
         "| :--- | :--- |",
         f"| Open Ports / Services | **{summary.get('total_services', 0)}** |",
-        f"| Total Discovered CVEs | **{summary.get('total_cves', 0)}** |",
+        f"| Total Discovered CVEs | **{summary.get('cve_summary_text', summary.get('total_cves', 0))}** |",
         f"| Critical Severity (CVSS 9.0+) | **{summary.get('critical_cves', 0)}** |",
         f"| High Severity (CVSS 7.0-8.9) | **{summary.get('high_cves', 0)}** |",
         f"| CISA Known Exploited (KEV) | **{summary.get('cisa_kev_cves', 0)}** |",
@@ -219,8 +245,18 @@ def generate_markdown_report(report_data: Dict[str, Any]) -> str:
         ])
         for s in services:
             banner_snippet = (s.get("banner", "")[:40] + "...") if len(s.get("banner", "")) > 40 else s.get("banner", "")
+            c_status = s.get("cve_status")
+            c_count = len(s.get("cves", []))
+            if c_status == "matched" or c_count > 0:
+                c_label = f"**{c_count} found**"
+            elif c_status == "failed":
+                c_label = "*Lookup Failed*"
+            elif c_status == "no_cpe":
+                c_label = "*No CPE Match*"
+            else:
+                c_label = "Clean (0)"
             lines.append(
-                f"| `{s.get('port')}/{s.get('protocol', 'tcp')}` | {s.get('service', '')} | {s.get('product', '')} | {s.get('version', '')} | `{banner_snippet}` | {len(s.get('cves', []))} |"
+                f"| `{s.get('port')}/{s.get('protocol', 'tcp')}` | {s.get('service', '')} | {s.get('product', '')} | {s.get('version', '')} | `{banner_snippet}` | {c_label} |"
             )
     else:
         lines.append("*No open services detected.*")
@@ -350,6 +386,17 @@ def generate_html_report(report_data: Dict[str, Any]) -> str:
     services_rows_html = ""
     for s in services:
         banner = s.get("banner", "")
+        c_status = s.get("cve_status")
+        c_count = len(s.get("cves", []))
+        if c_status == "matched" or c_count > 0:
+            c_badge = f'<span class="badge-count" style="background: var(--critical);">{c_count} CVEs</span>'
+        elif c_status == "failed":
+            c_badge = '<span class="badge-critical">Lookup Failed</span>'
+        elif c_status == "no_cpe":
+            c_badge = '<span class="badge-unknown">No CPE Match</span>'
+        else:
+            c_badge = '<span class="badge-safe">Clean (0)</span>'
+
         services_rows_html += f"""
         <tr>
             <td><strong>{s.get('port')}/{s.get('protocol', 'tcp')}</strong></td>
@@ -357,7 +404,7 @@ def generate_html_report(report_data: Dict[str, Any]) -> str:
             <td>{s.get('product', '')}</td>
             <td>{s.get('version', '')}</td>
             <td><div class="banner-cell">{banner if banner else '<span class="dim">No banner</span>'}</div></td>
-            <td><span class="badge-count">{len(s.get('cves', []))}</span></td>
+            <td>{c_badge}</td>
         </tr>
         """
 
@@ -456,7 +503,7 @@ def generate_html_report(report_data: Dict[str, Any]) -> str:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Reconnoiter Report: {report_data.get('target')}</title>
+    <title>Sentrix Report: {report_data.get('target')}</title>
     <style>
         :root {{
             --bg: #0f172a;
@@ -544,8 +591,8 @@ def generate_html_report(report_data: Dict[str, Any]) -> str:
     <div class="container">
         <header>
             <div class="header-title">
-                <div>Reconnoiter Assessment: <code>{report_data.get('target')}</code></div>
-                <div style="font-size: 14px; font-weight: normal; color: var(--text-muted);">{meta.get('scanner_version', 'Reconnoiter 2.0')}</div>
+                <div>Sentrix Assessment: <code>{report_data.get('target')}</code></div>
+                <div style="font-size: 14px; font-weight: normal; color: var(--text-muted);">{meta.get('scanner_version', 'Sentrix 2.1.0')}</div>
             </div>
             <div class="header-meta">
                 <div><strong>Host Status:</strong> <span style="color: {'#10b981' if report_data.get('alive') else '#ef4444'}; font-weight: bold;">{'ALIVE' if report_data.get('alive') else 'OFFLINE'}</span></div>
@@ -564,7 +611,7 @@ def generate_html_report(report_data: Dict[str, Any]) -> str:
             </div>
             <div class="kpi-card">
                 <div class="kpi-label">Total CVEs</div>
-                <div class="kpi-num" style="color: #cbd5e1;">{summary.get('total_cves', 0)}</div>
+                <div class="kpi-num" style="font-size: 15px; color: #cbd5e1; font-weight: 700; margin-top: 8px;">{summary.get('cve_summary_text', summary.get('total_cves', 0))}</div>
             </div>
             <div class="kpi-card">
                 <div class="kpi-label">CISA KEV (Exploited)</div>
@@ -691,7 +738,7 @@ def write_report(
         "alive": alive,
         "scan_time": timestamp,
         "metadata": metadata or {
-            "scanner_version": "Reconnoiter 2.0.0",
+            "scanner_version": "Sentrix 2.1.0",
             "scan_start_time": timestamp,
             "scan_duration_seconds": 0,
         },

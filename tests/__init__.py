@@ -1,2 +1,2 @@
-"""Reconnoiter Test Suite"""
+"""Sentrix Test Suite"""
 

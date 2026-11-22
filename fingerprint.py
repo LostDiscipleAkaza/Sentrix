@@ -10,7 +10,7 @@ import socket
 import ssl
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-logger = logging.getLogger("reconnoiter")
+logger = logging.getLogger("sentrix")
 
 
 # ---------------------------------------------------------------------------

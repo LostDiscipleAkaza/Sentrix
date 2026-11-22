@@ -57,7 +57,7 @@ class TestReport(unittest.TestCase):
             "alive": True,
             "services": self.sample_findings,
             "metadata": {
-                "scanner_version": "Reconnoiter 2.0.0",
+                "scanner_version": "Sentrix 2.1.0",
                 "scan_duration_seconds": 4.52,
                 "command_line_args": "example.com -p 22,80",
             },
@@ -72,6 +72,53 @@ class TestReport(unittest.TestCase):
         self.assertEqual(summary["critical_cves"], 2)
         self.assertEqual(summary["cisa_kev_cves"], 2)
         self.assertEqual(summary["high_epss_cves"], 2)
+
+    def test_compute_summary_worst_case_outcomes(self):
+        # 1. 0 CVEs (confirmed clean)
+        clean_data = {
+            "services": [
+                {"port": 80, "cve_status": "clean", "cves": []},
+                {"port": 443, "cve_status": "clean", "cves": []},
+            ]
+        }
+        s1 = _compute_summary(clean_data)
+        self.assertEqual(s1["cve_summary_text"], "0 CVEs (confirmed clean)")
+
+        # 2. 0 CVEs (no CPE match)
+        no_cpe_data = {
+            "services": [
+                {"port": 80, "cve_status": "clean", "cves": []},
+                {"port": 8080, "cve_status": "no_cpe", "cves": []},
+            ]
+        }
+        s2 = _compute_summary(no_cpe_data)
+        self.assertEqual(s2["cve_summary_text"], "0 CVEs (no CPE match)")
+
+        # 3. 0 CVEs (lookup failed - N/N services unassessed) - worst case dominates
+        failed_data = {
+            "services": [
+                {"port": 80, "cve_status": "clean", "cves": []},
+                {"port": 8080, "cve_status": "no_cpe", "cves": []},
+                {"port": 443, "cve_status": "failed", "cves": []},
+            ]
+        }
+        s3 = _compute_summary(failed_data)
+        self.assertEqual(s3["cve_summary_text"], "0 CVEs (lookup failed — 1/3 services unassessed)")
+
+        # 4. Total CVEs > 0 with partial failure
+        vuln_with_failed_data = {
+            "services": [
+                {"port": 80, "cve_status": "matched", "cves": [{"id": "CVE-2023-1", "severity": "CRITICAL"}]},
+                {"port": 443, "cve_status": "failed", "cves": []},
+            ]
+        }
+        s4 = _compute_summary(vuln_with_failed_data)
+        self.assertIn("1 (Critical: 1) — ⚠️ 1/2 service lookups failed", s4["cve_summary_text"])
+
+        # 5. No open services
+        empty_data = {"services": []}
+        s5 = _compute_summary(empty_data)
+        self.assertEqual(s5["cve_summary_text"], "0 (No open services)")
 
     def test_generate_remediations(self):
         summary = _compute_summary(self.sample_report_data)
@@ -102,7 +149,7 @@ class TestReport(unittest.TestCase):
             self.sample_report_data, self.sample_report_data["summary"]
         )
         md = generate_markdown_report(self.sample_report_data)
-        self.assertIn("# Reconnoiter Security Assessment Report: example.com", md)
+        self.assertIn("# Sentrix Security Assessment Report: example.com", md)
         self.assertIn("CVE-2021-41773", md)
         self.assertIn("Open Services & Banner Intelligence", md)
 

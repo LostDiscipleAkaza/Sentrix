@@ -3,16 +3,16 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "reconnoiter"
-version = "2.0.0"
-description = "Advanced network reconnaissance and vulnerability assessment pipeline"
+name = "sentrix"
+version = "2.1.0"
+description = "Sentrix: Advanced network reconnaissance and vulnerability assessment pipeline"
 readme = "README.md"
 requires-python = ">=3.8"
 license = {text = "MIT"}
 authors = [
-    {name = "Reconnoiter Team"}
+    {name = "Sentrix Security Team"}
 ]
-keywords = ["reconnaissance", "security", "scanner", "cve", "dns", "nvd", "epss", "cisa-kev"]
+keywords = ["reconnaissance", "security", "scanner", "cve", "dns", "nvd", "circl", "shodan", "epss", "cisa-kev"]
 dependencies = [
     "requests>=2.31.0",
     "dnspython>=2.4.0",
@@ -20,6 +20,7 @@ dependencies = [
 ]
 
 [project.scripts]
+sentrix = "main:main"
 reconnoiter = "main:main"
 
 [tool.setuptools]

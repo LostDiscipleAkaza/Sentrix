@@ -14,7 +14,7 @@ import dns.resolver
 import dns.zone
 import requests
 
-logger = logging.getLogger("reconnoiter")
+logger = logging.getLogger("sentrix")
 
 COMMON_RECORD_TYPES = ["A", "AAAA", "MX", "NS", "TXT", "CNAME", "SOA"]
 
