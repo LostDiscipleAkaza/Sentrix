@@ -675,17 +675,21 @@ def lookup_by_cpe(cpe23: Optional[str]) -> Dict[str, Any]:
         return {"status": "error", "cves": [], "reason": f"request_failed: {last_error}"}
 
     seen = {}
-    product_clean = product.lower().replace("_", "")
+    prod_raw = product.lower()
+    prod_clean = prod_raw.replace("_", "")
+    prod_spaced = prod_raw.replace("_", " ")
 
     for item in data.get("vulnerabilities", []):
         cve_obj = item.get("cve", {})
 
         # Validation: Protect against NVD returning default unfiltered feed (e.g. Ping of Death from 1999)
         # Verify that either the CVE configurations or descriptions relate strictly to the requested product
-        if product_clean:
+        if prod_clean:
             descs = " ".join(d.get("value", "").lower() for d in cve_obj.get("descriptions", []))
             configs_str = json.dumps(cve_obj.get("configurations", [])).lower()
-            if product_clean not in descs and product.lower() not in descs and product_clean not in configs_str:
+            matches_desc = (prod_raw in descs or prod_clean in descs or prod_spaced in descs)
+            matches_config = (prod_raw in configs_str or prod_clean in configs_str)
+            if not (matches_desc or matches_config):
                 continue
 
         entry = _parse_cve_entry(item)
