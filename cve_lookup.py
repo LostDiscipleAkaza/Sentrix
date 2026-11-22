@@ -14,6 +14,10 @@ from typing import Any, Dict, Generator, List, Optional, Set, Tuple
 
 import requests
 
+from utils import load_env
+
+load_env()
+
 logger = logging.getLogger("sentrix")
 
 NVD_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"

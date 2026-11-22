@@ -55,6 +55,23 @@ class TestCLI(unittest.TestCase):
         tokens = [t.strip() for t in re.split(r"[\s,;]+", user_input) if t.strip()]
         self.assertEqual(tokens, ["192.168.1.1", "example.com"])
 
+    def test_load_env_fallback(self):
+        import os
+        import tempfile
+        from utils import load_env
+
+        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".env") as f:
+            f.write("# comment line\nTEST_SENTRIX_KEY=my_secret_token_123\n")
+            f_name = f.name
+
+        try:
+            load_env(f_name)
+            self.assertEqual(os.environ.get("TEST_SENTRIX_KEY"), "my_secret_token_123")
+        finally:
+            if os.path.exists(f_name):
+                os.remove(f_name)
+            os.environ.pop("TEST_SENTRIX_KEY", None)
+
 
 if __name__ == "__main__":
     unittest.main()

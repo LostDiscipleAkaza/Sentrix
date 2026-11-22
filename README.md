@@ -68,6 +68,18 @@ Install dependencies:
 pip install -r requirements.txt
 ```
 
+### Environment Configuration (.env)
+
+Sentrix automatically loads credentials from a local `.env` file upon startup. Copy the provided template to get started:
+```bash
+cp .env.example .env
+```
+Inside `.env`, you can configure:
+- `NVD_API_KEY`: Free NIST NVD key (raises rate limit from 5 to 50 req/30s).
+- `CIRCL_API_KEY`: Optional key (public API at `vulnerability.circl.lu` is free and needs no key).
+- `SHODAN_API_KEY`: Optional key (`internetdb.shodan.io` is 100% free and needs no key).
+- `SENTRIX_CACHE_DB`: Custom path for the SQLite threat intelligence cache (default: `cve_cache.db`).
+
 ---
 
 ## Usage

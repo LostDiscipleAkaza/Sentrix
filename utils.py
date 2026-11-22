@@ -4,9 +4,45 @@ Shared utilities, structured logging, and ASCII frame rendering for Sentrix.
 
 import datetime
 import logging
+import os
 import re
 import sys
 from typing import Any, Dict, List, Optional
+
+
+def load_env(env_path: str = ".env") -> None:
+    """
+    Loads environment variables from a .env file into os.environ.
+    Uses python-dotenv if available, and falls back to a clean native parser.
+    """
+    try:
+        import dotenv
+        dotenv.load_dotenv(env_path)
+        return
+    except ImportError:
+        pass
+
+    if not os.path.exists(env_path):
+        return
+
+    try:
+        with open(env_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" in line:
+                    key, val = line.split("=", 1)
+                    key = key.strip()
+                    val = val.strip().strip("'\"")
+                    if key and key not in os.environ:
+                        os.environ[key] = val
+    except Exception:
+        pass
+
+
+# Automatically load .env on import
+load_env()
 
 
 class ColorCodes:
